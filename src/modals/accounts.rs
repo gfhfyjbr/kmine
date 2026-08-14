@@ -141,6 +141,7 @@ fn account_list(
                     on_select(id, window, cx);
                 },
                 move |_, window, cx| {
+                    cx.stop_propagation();
                     on_delete(id, window, cx);
                 },
             )
@@ -167,7 +168,10 @@ fn account_row(
                         .ghost()
                         .compact()
                         .label("Delete")
-                        .on_click(on_delete),
+                        .on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            on_delete(event, window, cx);
+                        }),
                 ),
         )
         .on_click(on_select)
