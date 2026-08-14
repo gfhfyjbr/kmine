@@ -1,3 +1,5 @@
+mod crypto;
+mod keychain;
 mod migrate;
 
 use crate::error::EngineError;
