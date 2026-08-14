@@ -3335,13 +3335,17 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "directories",
+ "oo7",
+ "pollster 0.4.0",
  "rand 0.8.7",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "uuid",
+ "windows 0.61.3",
 ]
 
 [[package]]

@@ -6,11 +6,29 @@ use crate::error::EngineError;
 use rusqlite::Connection;
 use std::path::Path;
 
+pub use keychain::{Keychain, MemoryKeychain, OsKeychain};
+
+pub fn ensure_master_key(keychain: &dyn Keychain) -> Result<[u8; 32], EngineError> {
+    if let Some(key) = keychain.get_master_key()? {
+        Ok(key)
+    } else {
+        let key = crypto::generate_master_key();
+        keychain.set_master_key(&key)?;
+        Ok(key)
+    }
+}
+
 pub struct Store {
     pub(crate) conn: Connection,
 }
 
 impl Store {
+    pub fn open(path: &Path, keychain: &dyn Keychain) -> Result<(Self, [u8; 32]), EngineError> {
+        let store = Self::open_file(path)?;
+        let key = ensure_master_key(keychain)?;
+        Ok((store, key))
+    }
+
     pub fn open_file(path: &Path) -> Result<Self, EngineError> {
         let conn = if path.as_os_str() == ":" || path == Path::new(":memory:") {
             Connection::open_in_memory()?
@@ -50,14 +68,54 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn put_secret(
+        &self,
+        key: &[u8; 32],
+        id: &str,
+        plaintext: &[u8],
+    ) -> Result<(), EngineError> {
+        let (nonce, ciphertext) = crypto::seal(key, id, plaintext)?;
+        self.conn.execute(
+            "INSERT INTO secrets(id, nonce, ciphertext) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext",
+            rusqlite::params![id, nonce, ciphertext],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_secret(&self, key: &[u8; 32], id: &str) -> Result<Option<Vec<u8>>, EngineError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT nonce, ciphertext FROM secrets WHERE id = ?1")?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => {
+                let nonce: Vec<u8> = row.get(0)?;
+                let ciphertext: Vec<u8> = row.get(1)?;
+                Ok(Some(crypto::open(key, id, &nonce, &ciphertext)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_secret(&self, id: &str) -> Result<(), EngineError> {
+        self.conn
+            .execute("DELETE FROM secrets WHERE id = ?1", [id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Store;
+    use super::keychain::MemoryKeychain;
+    use std::path::Path;
 
     fn open_mem() -> Store {
-        Store::open_file(std::path::Path::new(":memory:")).unwrap()
+        Store::open_file(Path::new(":memory:")).unwrap()
     }
 
     #[test]
@@ -95,5 +153,31 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 1);
+    }
+
+    #[test]
+    fn put_get_secret_round_trip() {
+        let kc = MemoryKeychain::new();
+        let (store, key) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        store
+            .put_secret(&key, "account/u1", br#"{"msa_refresh":"r"}"#)
+            .unwrap();
+        let got = store.get_secret(&key, "account/u1").unwrap().unwrap();
+        assert_eq!(got, br#"{"msa_refresh":"r"}"#);
+    }
+
+    #[test]
+    fn open_creates_master_key_once() {
+        let kc = MemoryKeychain::new();
+        let (_, k1) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        let (_, k2) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn missing_secret_is_none() {
+        let kc = MemoryKeychain::new();
+        let (store, key) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        assert!(store.get_secret(&key, "nope").unwrap().is_none());
     }
 }
