@@ -4,6 +4,7 @@ use crate::fabric::{
     FabricLoaderIndex, FabricProfile, LOADER_INDEX_URL, merge_fabric, pick_loader_version,
     profile_url,
 };
+use crate::forge::{merge_forge, prepare_forge, run_processors};
 use crate::http::HttpFiles;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::instance_not_found;
@@ -135,13 +136,6 @@ impl Engine {
                 .ok_or_else(|| instance_not_found(&self.paths))?
         };
 
-        if !matches!(row.loader, Loader::Vanilla | Loader::Fabric) {
-            return Err(EngineError::LoaderUnavailable {
-                loader: row.loader,
-                minecraft: row.minecraft_version,
-            });
-        }
-
         check_cancel(cancel)?;
         let account = {
             let store = self.store.lock();
@@ -205,10 +199,25 @@ impl Engine {
             .await?;
         progress.set("Version", 1, 1);
         let version: VersionInfo = read_json(&version_path)?;
-        let version = if row.loader == Loader::Fabric {
+        let mut version = if row.loader == Loader::Fabric {
             merge_fabric_profile(&http, &row, version, progress, cancel).await?
         } else {
             version
+        };
+        let forge = if row.loader == Loader::Forge {
+            Some(
+                prepare_forge(
+                    &http,
+                    &self.paths,
+                    &row.minecraft_version,
+                    row.loader_version.as_deref(),
+                    progress,
+                    cancel,
+                )
+                .await?,
+            )
+        } else {
+            None
         };
 
         check_cancel(cancel)?;
@@ -227,6 +236,12 @@ impl Engine {
         progress.set("Client", 0, 1);
         let client = fetch_client(&http, &self.paths, &version, cancel).await?;
         progress.set("Client", 1, 1);
+
+        if let Some((profile, forge_version)) = forge {
+            check_cancel(cancel)?;
+            run_processors(&java, &profile, &self.paths, &client, cancel).await?;
+            version = merge_forge(version, forge_version);
+        }
 
         check_cancel(cancel)?;
         let artifacts = select_libraries(&version);
@@ -327,6 +342,7 @@ impl Engine {
             launcher_name: "kmine".into(),
             launcher_version: env!("CARGO_PKG_VERSION").into(),
             classpath: join_classpath(&classpath),
+            library_directory: self.paths.cache_libraries.to_string_lossy().into_owned(),
             resolution_width: "854".into(),
             resolution_height: "480".into(),
             quick_play_singleplayer: None,
@@ -772,6 +788,36 @@ mod tests {
                 }
             ),
             "fabric prepare must proceed past LoaderUnavailable, got {err:?}"
+        );
+        assert!(matches!(err, EngineError::NoAccount));
+    }
+
+    #[tokio::test]
+    async fn prepare_forge_offline_errors_without_account() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "G".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Forge,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                EngineError::LoaderUnavailable {
+                    loader: Loader::Forge,
+                    ..
+                }
+            ),
+            "forge prepare must proceed past LoaderUnavailable, got {err:?}"
         );
         assert!(matches!(err, EngineError::NoAccount));
     }

@@ -66,6 +66,17 @@ pub async fn fetch_libraries(
             return Err(EngineError::Cancelled);
         }
         let dest = paths.cache_libraries.join(&artifact.path);
+        if artifact.url.is_empty() {
+            if dest.is_file() {
+                progress.set("Libraries", (i as u64) + 1, total);
+                dests.push(dest);
+                continue;
+            }
+            return Err(EngineError::io(
+                dest,
+                io::Error::new(io::ErrorKind::NotFound, "library missing (no download url)"),
+            ));
+        }
         http.download_sha1(&artifact.url, &dest, artifact.sha1.as_deref(), cancel)
             .await?;
         progress.set("Libraries", (i as u64) + 1, total);
@@ -160,7 +171,7 @@ pub async fn fetch_client(
 
 fn from_download(art: &Artifact, extract_natives: bool) -> Option<LibraryArtifact> {
     let path = art.path.as_ref().filter(|p| !p.is_empty())?.clone();
-    let url = art.url.as_ref().filter(|u| !u.is_empty())?.clone();
+    let url = art.url.clone().unwrap_or_default();
     Some(LibraryArtifact {
         path,
         url,

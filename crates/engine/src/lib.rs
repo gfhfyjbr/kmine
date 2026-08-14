@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod error;
 pub mod fabric;
+pub mod forge;
 pub mod http;
 pub mod ids;
 pub mod instance;
