@@ -118,6 +118,15 @@ pub trait ProgressSink: Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickPlay {
+    World { folder: String },
+    Server { address: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GameProcessId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub java: PathBuf,
     pub jvm_args: Vec<String>,

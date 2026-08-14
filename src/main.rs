@@ -1,4 +1,5 @@
 mod app;
+mod game_output;
 mod modals;
 mod screens;
 

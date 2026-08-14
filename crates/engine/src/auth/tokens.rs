@@ -63,6 +63,12 @@ pub fn secret_id(uuid: AccountId) -> String {
     format!("account/{}", uuid.as_hyphenated())
 }
 
+pub enum TokenPersist {
+    Unchanged,
+    Save(AccountSecrets),
+    Delete,
+}
+
 pub async fn ensure_mc_token(
     http: &HttpFiles,
     store: &Store,
@@ -72,11 +78,30 @@ pub async fn ensure_mc_token(
     endpoints: &AuthEndpoints,
 ) -> Result<String, EngineError> {
     let sid = secret_id(account);
-    let mut secrets = load_secrets(store, key, &sid)?;
+    let secrets = load_secrets(store, key, &sid)?;
+    let (token, persist) = ensure_mc_token_owned(http, secrets, now, endpoints).await?;
+    match persist {
+        TokenPersist::Unchanged => Ok(token),
+        TokenPersist::Save(secrets) => {
+            save_secrets(store, key, &sid, &secrets)?;
+            Ok(token)
+        }
+        TokenPersist::Delete => {
+            store.delete_secret(&sid)?;
+            Err(EngineError::AuthExpired)
+        }
+    }
+}
 
+pub async fn ensure_mc_token_owned(
+    http: &HttpFiles,
+    mut secrets: AccountSecrets,
+    now: DateTime<Utc>,
+    endpoints: &AuthEndpoints,
+) -> Result<(String, TokenPersist), EngineError> {
     if let Some(mc) = secrets.mc_access.as_ref() {
         if still_valid(mc.expiry, now) {
-            return Ok(mc.token.clone());
+            return Ok((mc.token.clone(), TokenPersist::Unchanged));
         }
     }
 
@@ -86,8 +111,8 @@ pub async fn ensure_mc_token(
         .is_some_and(|t| still_valid(t.expiry, now))
     {
         minecraft_login(http, endpoints, &mut secrets, now).await?;
-        save_secrets(store, key, &sid, &secrets)?;
-        return take_mc(&secrets);
+        let token = take_mc(&secrets)?;
+        return Ok((token, TokenPersist::Save(secrets)));
     }
 
     if secrets
@@ -97,8 +122,8 @@ pub async fn ensure_mc_token(
     {
         xsts_auth(http, endpoints, &mut secrets, now).await?;
         minecraft_login(http, endpoints, &mut secrets, now).await?;
-        save_secrets(store, key, &sid, &secrets)?;
-        return take_mc(&secrets);
+        let token = take_mc(&secrets)?;
+        return Ok((token, TokenPersist::Save(secrets)));
     }
 
     if secrets
@@ -109,8 +134,8 @@ pub async fn ensure_mc_token(
         xbox_auth(http, endpoints, &mut secrets, now).await?;
         xsts_auth(http, endpoints, &mut secrets, now).await?;
         minecraft_login(http, endpoints, &mut secrets, now).await?;
-        save_secrets(store, key, &sid, &secrets)?;
-        return take_mc(&secrets);
+        let token = take_mc(&secrets)?;
+        return Ok((token, TokenPersist::Save(secrets)));
     }
 
     let Some(refresh) = secrets.msa_refresh.clone().filter(|s| !s.is_empty()) else {
@@ -123,8 +148,7 @@ pub async fn ensure_mc_token(
             secrets.msa_access = Some(access);
         }
         Err(EngineError::AuthExpired) => {
-            store.delete_secret(&sid)?;
-            return Err(EngineError::AuthExpired);
+            return Ok((String::new(), TokenPersist::Delete));
         }
         Err(err) => return Err(err),
     }
@@ -132,8 +156,8 @@ pub async fn ensure_mc_token(
     xbox_auth(http, endpoints, &mut secrets, now).await?;
     xsts_auth(http, endpoints, &mut secrets, now).await?;
     minecraft_login(http, endpoints, &mut secrets, now).await?;
-    save_secrets(store, key, &sid, &secrets)?;
-    take_mc(&secrets)
+    let token = take_mc(&secrets)?;
+    Ok((token, TokenPersist::Save(secrets)))
 }
 
 pub async fn login_with_code(

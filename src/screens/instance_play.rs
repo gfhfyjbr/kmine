@@ -1,46 +1,42 @@
-use gpui::{IntoElement, ParentElement, RenderOnce, Styled, Window, div, px};
+use gpui::prelude::*;
+use gpui::{App, ClickEvent, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{
-    ActiveTheme, Disableable, StyledExt,
+    ActiveTheme, StyledExt,
     button::{Button, ButtonVariants},
     v_flex,
 };
 use kmine_engine::InstanceSummary;
 
-#[derive(IntoElement)]
-pub struct PlayTab {
-    name: String,
-    minecraft_version: String,
-    loader: String,
-}
-
-impl PlayTab {
-    pub fn new(instance: &InstanceSummary) -> Self {
-        Self {
-            name: instance.name.clone(),
-            minecraft_version: instance.minecraft_version.clone(),
-            loader: instance.loader.as_str().to_string(),
-        }
-    }
-}
-
-impl RenderOnce for PlayTab {
-    fn render(self, _: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .p_6()
-            .gap_3()
-            .child(div().text_lg().font_semibold().child(self.name))
-            .child(
+pub fn play_tab(
+    instance: &InstanceSummary,
+    status: &str,
+    on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let label = if instance.running { "Stop" } else { "Play" };
+    v_flex()
+        .size_full()
+        .p_6()
+        .gap_3()
+        .child(div().text_lg().font_semibold().child(instance.name.clone()))
+        .child(div().text_color(cx.theme().muted_foreground).child(format!(
+            "{} · {}",
+            instance.minecraft_version,
+            instance.loader.as_str()
+        )))
+        .child(
+            Button::new("play")
+                .primary()
+                .label(label)
+                .w(px(120.))
+                .on_click(on_play),
+        )
+        .when(!status.is_empty(), |this| {
+            this.child(
                 div()
+                    .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("{} · {}", self.minecraft_version, self.loader)),
+                    .child(status.to_string()),
             )
-            .child(
-                Button::new("play")
-                    .primary()
-                    .label("Play")
-                    .disabled(true)
-                    .w(px(120.)),
-            )
-    }
+        })
 }

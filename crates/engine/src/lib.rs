@@ -4,36 +4,50 @@ pub mod http;
 pub mod ids;
 pub mod instance;
 pub mod java;
+pub mod launch;
 pub mod mojang;
 pub mod paths;
+pub mod redact;
 pub mod store;
 pub mod types;
 
 pub use error::EngineError;
 pub use http::HttpFiles;
 pub use ids::{AccountId, InstanceId, Loader};
+pub use launch::VERSION_MANIFEST_URL;
 pub use paths::LauncherPaths;
+pub use redact::redact_line;
 pub use store::{Keychain, MemoryKeychain, OsKeychain};
+pub use tokio_util::sync::CancellationToken;
 pub use types::{
-    AccountRecord, AccountSummary, CreateInstance, InstancePatch, InstanceRow, InstanceSummary,
-    LaunchPlan, ProgressSink, SandboxSpec, SandboxStatus,
+    AccountRecord, AccountSummary, CreateInstance, GameProcessId, InstancePatch, InstanceRow,
+    InstanceSummary, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec, SandboxStatus,
 };
 
 use crate::instance::{
     create_instance_dirs, delete_instance_dir, rename_instance_dir, slug_from_name, unique_slug,
 };
 use crate::store::Store;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
 
 pub struct Engine {
-    paths: LauncherPaths,
-    store: parking_lot::Mutex<Store>,
-    master_key: [u8; 32],
-    events: tokio::sync::broadcast::Sender<Event>,
-    processes: parking_lot::Mutex<std::collections::HashMap<InstanceId, Running>>,
-    login_lock: tokio::sync::Mutex<bool>,
+    pub(crate) paths: LauncherPaths,
+    pub(crate) store: parking_lot::Mutex<Store>,
+    pub(crate) master_key: [u8; 32],
+    pub(crate) events: tokio::sync::broadcast::Sender<Event>,
+    pub(crate) processes: Arc<parking_lot::Mutex<HashMap<InstanceId, Running>>>,
+    pub(crate) preparing: parking_lot::Mutex<HashSet<InstanceId>>,
+    pub(crate) redact_tokens: parking_lot::Mutex<HashMap<InstanceId, Vec<String>>>,
+    pub(crate) login_lock: tokio::sync::Mutex<bool>,
+    pub(crate) rt: tokio::runtime::Handle,
 }
 
-pub struct Running;
+pub struct Running {
+    pub(crate) kill: tokio::sync::watch::Sender<bool>,
+    pub(crate) started_at: Instant,
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -84,15 +98,22 @@ impl Engine {
     fn from_keychain(paths: LauncherPaths, kc: &dyn Keychain) -> Result<Self, EngineError> {
         paths.create_dirs()?;
         let (store, master_key) = Store::open(&paths.db, kc)?;
-        let (events, _) = tokio::sync::broadcast::channel(64);
+        let (events, _) = tokio::sync::broadcast::channel(16384);
         Ok(Self {
             paths,
             store: parking_lot::Mutex::new(store),
             master_key,
             events,
-            processes: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            processes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            preparing: parking_lot::Mutex::new(HashSet::new()),
+            redact_tokens: parking_lot::Mutex::new(HashMap::new()),
             login_lock: tokio::sync::Mutex::new(false),
+            rt: tokio::runtime::Handle::current(),
         })
+    }
+
+    pub fn event_sender(&self) -> tokio::sync::broadcast::Sender<Event> {
+        self.events.clone()
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Event> {
@@ -277,7 +298,7 @@ impl Engine {
         Ok(())
     }
 
-    fn emit(&self, event: Event) {
+    pub(crate) fn emit(&self, event: Event) {
         let _ = self.events.send(event);
     }
 }
@@ -302,14 +323,14 @@ impl EngineHandle {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
         Err(_) => 0,
     }
 }
 
-fn instance_not_found(paths: &LauncherPaths) -> EngineError {
+pub(crate) fn instance_not_found(paths: &LauncherPaths) -> EngineError {
     EngineError::io(
         paths.instances.clone(),
         std::io::Error::new(std::io::ErrorKind::NotFound, "instance not found"),
