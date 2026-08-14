@@ -1,7 +1,14 @@
 pub mod args;
+pub mod assets;
+pub mod libraries;
 pub mod rules;
 
 pub use args::{ArgContext, build_args, interpolate, join_classpath};
+pub use assets::{AssetsRoot, fetch_assets};
+pub use libraries::{
+    LibraryArtifact, extract_natives, fetch_client, fetch_libraries, natives_dir_name,
+    select_libraries,
+};
 pub use rules::{
     FeatureSet, Rule, RuleAction, RuleFeatures, RuleOs, current_os_arch, current_os_name,
     rule_allows,

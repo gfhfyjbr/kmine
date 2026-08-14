@@ -1,0 +1,32 @@
+{
+  "id": "libs-test",
+  "mainClass": "net.minecraft.client.main.Main",
+  "libraries": [
+    {
+      "name": "com.example:allowed:1.0",
+      "downloads": {
+        "artifact": {
+          "path": "com/example/allowed/1.0/allowed-1.0.jar",
+          "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 1,
+          "url": "https://example.invalid/allowed-1.0.jar"
+        }
+      }
+    },
+    {
+      "name": "com.example:nolinux:1.0",
+      "downloads": {
+        "artifact": {
+          "path": "com/example/nolinux/1.0/nolinux-1.0.jar",
+          "sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 1,
+          "url": "https://example.invalid/nolinux-1.0.jar"
+        }
+      },
+      "rules": [
+        { "action": "allow" },
+        { "action": "disallow", "os": { "name": "linux" } }
+      ]
+    }
+  ]
+}
