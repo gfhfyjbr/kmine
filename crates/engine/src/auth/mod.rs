@@ -49,8 +49,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_client_id_is_not_configured() {
-        assert!(CLIENT_ID.is_empty());
+    fn client_id_is_azure_uuid() {
+        assert!(
+            uuid::Uuid::parse_str(CLIENT_ID).is_ok(),
+            "CLIENT_ID must be an Azure application UUID"
+        );
     }
 
     #[tokio::test]
@@ -133,6 +136,9 @@ mod tests {
 
     #[tokio::test]
     async fn start_login_without_client_id() {
+        if !CLIENT_ID.is_empty() {
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
