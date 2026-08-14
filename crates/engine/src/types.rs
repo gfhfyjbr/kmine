@@ -147,6 +147,24 @@ pub enum QuickPlay {
     Server { address: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuickPlayLists {
+    pub worlds: Vec<QuickPlayWorld>,
+    pub servers: Vec<QuickPlayServer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickPlayWorld {
+    pub folder: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickPlayServer {
+    pub name: String,
+    pub address: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameProcessId(pub u32);
 

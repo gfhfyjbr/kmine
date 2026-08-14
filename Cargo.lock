@@ -3396,6 +3396,7 @@ dependencies = [
  "aes-gcm",
  "chrono",
  "directories",
+ "flate2",
  "hex",
  "httparse",
  "oauth2",

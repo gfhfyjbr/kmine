@@ -54,8 +54,9 @@ impl Engine {
         cancel: CancellationToken,
         quick_play: Option<QuickPlay>,
     ) -> Result<LaunchPlan, EngineError> {
-        let _ = quick_play;
-        let result = self.prepare_vanilla(id, progress, &cancel).await;
+        let result = self
+            .prepare_vanilla(id, progress, &cancel, quick_play)
+            .await;
         self.emit(Event::PrepareFinished {
             id,
             ok: result.is_ok(),
@@ -124,6 +125,7 @@ impl Engine {
         id: InstanceId,
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
+        quick_play: Option<QuickPlay>,
     ) -> Result<LaunchPlan, EngineError> {
         check_cancel(cancel)?;
         let _guard = self.begin_prepare(id)?;
@@ -329,6 +331,8 @@ impl Engine {
         }
         classpath.push(client);
 
+        let (features, quick_play_singleplayer, quick_play_multiplayer) =
+            quick_play_launch(quick_play);
         let ctx = ArgContext {
             auth_player_name: account.username,
             auth_uuid: account.uuid.0.as_simple().to_string(),
@@ -345,10 +349,10 @@ impl Engine {
             library_directory: self.paths.cache_libraries.to_string_lossy().into_owned(),
             resolution_width: "854".into(),
             resolution_height: "480".into(),
-            quick_play_singleplayer: None,
-            quick_play_multiplayer: None,
+            quick_play_singleplayer,
+            quick_play_multiplayer,
         };
-        let (mut jvm_args, game_args) = build_args(&version, &ctx, &FeatureSet::default());
+        let (mut jvm_args, game_args) = build_args(&version, &ctx, &features);
         if let Some(arg) = logging_arg {
             jvm_args.push(arg);
         }
@@ -430,6 +434,23 @@ async fn merge_fabric_profile(
     };
     progress.set("Fabric loader", 2, 2);
     Ok(merge_fabric(vanilla, profile))
+}
+
+fn quick_play_launch(
+    quick_play: Option<QuickPlay>,
+) -> (FeatureSet, Option<String>, Option<String>) {
+    let mut features = FeatureSet::default();
+    match quick_play {
+        Some(QuickPlay::World { folder }) => {
+            features.quick_play_single = true;
+            (features, Some(folder), None)
+        }
+        Some(QuickPlay::Server { address }) => {
+            features.quick_play_multi = true;
+            (features, None, Some(address))
+        }
+        None => (features, None, None),
+    }
 }
 
 fn check_cancel(cancel: &CancellationToken) -> Result<(), EngineError> {
@@ -693,8 +714,9 @@ mod tests {
     use super::VERSION_MANIFEST_URL;
     use crate::error::EngineError;
     use crate::ids::{InstanceId, Loader};
+    use crate::mojang::FeatureSet;
     use crate::store::MemoryKeychain;
-    use crate::types::{CreateInstance, LaunchPlan, ProgressSink, SandboxSpec};
+    use crate::types::{CreateInstance, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec};
     use crate::{Engine, LauncherPaths};
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
@@ -732,6 +754,38 @@ mod tests {
                 network: true,
             },
         }
+    }
+
+    #[test]
+    fn prepare_world_sets_singleplayer_feature() {
+        let (feat, single, multi) = super::quick_play_launch(Some(QuickPlay::World {
+            folder: "New World".into(),
+        }));
+        assert_eq!(
+            feat,
+            FeatureSet {
+                quick_play_single: true,
+                ..FeatureSet::default()
+            }
+        );
+        assert_eq!(single.as_deref(), Some("New World"));
+        assert_eq!(multi, None);
+    }
+
+    #[test]
+    fn prepare_server_sets_multiplayer_feature() {
+        let (feat, single, multi) = super::quick_play_launch(Some(QuickPlay::Server {
+            address: "mc.hypixel.net".into(),
+        }));
+        assert_eq!(
+            feat,
+            FeatureSet {
+                quick_play_multi: true,
+                ..FeatureSet::default()
+            }
+        );
+        assert_eq!(multi.as_deref(), Some("mc.hypixel.net"));
+        assert_eq!(single, None);
     }
 
     #[test]

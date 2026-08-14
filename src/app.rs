@@ -13,7 +13,7 @@ use gpui_component::{
 };
 use kmine_engine::{
     AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
-    InstanceId, InstancePatch, InstanceSummary, SandboxStatus,
+    InstanceId, InstancePatch, InstanceSummary, QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
 use crate::modals::accounts::{self, AccountsModal};
@@ -45,6 +45,7 @@ pub struct KmineApp {
     content_mods: Vec<ContentEntry>,
     content_resourcepacks: Vec<ContentEntry>,
     content_shaderpacks: Vec<ContentEntry>,
+    quick_play: QuickPlayLists,
     settings: Option<instance_settings::SettingsForm>,
 }
 
@@ -68,6 +69,7 @@ impl KmineApp {
             content_mods: Vec::new(),
             content_resourcepacks: Vec::new(),
             content_shaderpacks: Vec::new(),
+            quick_play: QuickPlayLists::default(),
             settings: None,
         };
         this.listen_engine_events(cx);
@@ -90,6 +92,7 @@ impl KmineApp {
     fn select_instance(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(id);
         self.reload_content();
+        self.reload_quick_play();
         if self.instance_pane == InstancePane::Settings {
             self.load_settings(id, window, cx);
         }
@@ -99,7 +102,7 @@ impl KmineApp {
     fn set_pane(&mut self, pane: InstancePane, window: &mut Window, cx: &mut Context<Self>) {
         self.instance_pane = pane;
         match pane {
-            InstancePane::Play => {}
+            InstancePane::Play => self.reload_quick_play(),
             InstancePane::Content => self.reload_content(),
             InstancePane::Settings => {
                 if let Some(id) = self.selected {
@@ -129,6 +132,14 @@ impl KmineApp {
             .engine
             .list_content(id, ContentFolder::Shaderpacks)
             .unwrap_or_default();
+    }
+
+    fn reload_quick_play(&mut self) {
+        let Some(id) = self.selected else {
+            self.quick_play = QuickPlayLists::default();
+            return;
+        };
+        self.quick_play = self.engine.list_quick_play(id).unwrap_or_default();
     }
 
     fn load_settings(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
@@ -268,6 +279,7 @@ impl KmineApp {
                     }
                 }
                 self.reload_content();
+                self.reload_quick_play();
             }
             Event::Progress {
                 id,
@@ -292,7 +304,10 @@ impl KmineApp {
                 self.refresh_accounts();
                 self.show_accounts = true;
             }
-            Event::ProcessExited { .. } => self.refresh_instances(),
+            Event::ProcessExited { .. } => {
+                self.refresh_instances();
+                self.reload_quick_play();
+            }
             Event::Error(message) => self.status = message,
             Event::LogLine { .. } => {}
         }
@@ -347,6 +362,7 @@ impl KmineApp {
                         this.selected = Some(id);
                         this.refresh_instances();
                         this.reload_content();
+                        this.reload_quick_play();
                         this.status.clear();
                     }
                     Ok(Err(err)) => this.status = err.to_string(),
@@ -437,11 +453,19 @@ impl KmineApp {
         .detach();
     }
 
-    fn play_or_stop(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+    fn play_or_stop(
+        &mut self,
+        id: InstanceId,
+        quick_play: Option<QuickPlay>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
             return;
         };
         if instance.running {
+            if quick_play.is_some() {
+                return;
+            }
             let _ = self.engine.kill(id);
             return;
         }
@@ -467,7 +491,7 @@ impl KmineApp {
             let prepared = rt
                 .spawn(async move {
                     let sink = EventProgressSink::new(engine.event_sender(), id);
-                    let plan = engine.prepare(id, &sink, cancel, None).await?;
+                    let plan = engine.prepare(id, &sink, cancel, quick_play).await?;
                     engine.spawn(id, plan)
                 })
                 .await;
@@ -542,8 +566,12 @@ impl KmineApp {
 
 impl Render for KmineApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.instance_pane == InstancePane::Content && self.selected.is_some() {
-            self.reload_content();
+        if self.selected.is_some() {
+            match self.instance_pane {
+                InstancePane::Play => self.reload_quick_play(),
+                InstancePane::Content => self.reload_content(),
+                InstancePane::Settings => {}
+            }
         }
         let this = cx.weak_entity();
         let selected = self.selected_instance().cloned();
@@ -600,6 +628,7 @@ impl Render for KmineApp {
                                             &self.content_mods,
                                             &self.content_resourcepacks,
                                             &self.content_shaderpacks,
+                                            &self.quick_play,
                                             self.settings.as_ref(),
                                             &sandbox_status,
                                             this.clone(),
@@ -698,6 +727,7 @@ fn right_pane(
     mods: &[ContentEntry],
     resourcepacks: &[ContentEntry],
     shaderpacks: &[ContentEntry],
+    quick_play: &QuickPlayLists,
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
     this: WeakEntity<KmineApp>,
@@ -714,9 +744,19 @@ fn right_pane(
                 instance_play::play_tab(
                     instance,
                     status,
-                    move |_, _, cx| {
+                    quick_play,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.play_or_stop(id, None, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    move |quick, _, _, cx| {
                         this.update(cx, |this, cx| {
-                            this.play_or_stop(id, cx);
+                            this.play_or_stop(id, Some(quick), cx);
                         })
                         .ok();
                     },

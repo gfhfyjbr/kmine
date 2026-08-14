@@ -9,6 +9,7 @@ pub mod instance;
 pub mod java;
 pub mod launch;
 pub mod mojang;
+pub mod nbt;
 pub mod paths;
 pub mod redact;
 pub mod store;
@@ -24,8 +25,8 @@ pub use store::{Keychain, MemoryKeychain, OsKeychain};
 pub use tokio_util::sync::CancellationToken;
 pub use types::{
     AccountRecord, AccountSummary, ContentEntry, ContentFolder, CreateInstance, GameProcessId,
-    InstancePatch, InstanceRow, InstanceSummary, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec,
-    SandboxStatus,
+    InstancePatch, InstanceRow, InstanceSummary, LaunchPlan, ProgressSink, QuickPlay,
+    QuickPlayLists, QuickPlayServer, QuickPlayWorld, SandboxSpec, SandboxStatus,
 };
 
 use crate::instance::{
