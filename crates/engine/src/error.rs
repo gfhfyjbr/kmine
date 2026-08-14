@@ -42,7 +42,7 @@ pub enum EngineError {
         source: std::io::Error,
     },
     #[error("sqlite: {0}")]
-    Sqlite(String),
+    Sqlite(#[from] rusqlite::Error),
     #[error("crypto failure")]
     Crypto,
     #[error("http {status} for {url}")]
