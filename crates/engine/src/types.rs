@@ -116,3 +116,24 @@ pub enum SandboxStatus {
 pub trait ProgressSink: Send + Sync {
     fn set(&self, title: &str, done: u64, total: u64);
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlan {
+    pub java: PathBuf,
+    pub jvm_args: Vec<String>,
+    pub main_class: String,
+    pub game_args: Vec<String>,
+    pub classpath: Vec<PathBuf>,
+    pub natives_dir: PathBuf,
+    pub cwd: PathBuf, // instances/<slug>/.minecraft
+    pub env: Vec<(String, String)>,
+    pub sandbox: SandboxSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxSpec {
+    pub enabled: bool,
+    pub allow_read: Vec<PathBuf>,
+    pub allow_write: Vec<PathBuf>,
+    pub network: bool, // always true for Minecraft
+}

@@ -1,6 +1,7 @@
 pub mod error;
 pub mod ids;
 pub mod instance;
+pub mod mojang;
 pub mod paths;
 pub mod store;
 pub mod types;
@@ -11,7 +12,7 @@ pub use paths::LauncherPaths;
 pub use store::{Keychain, MemoryKeychain, OsKeychain};
 pub use types::{
     AccountRecord, AccountSummary, CreateInstance, InstancePatch, InstanceRow, InstanceSummary,
-    ProgressSink, SandboxStatus,
+    LaunchPlan, ProgressSink, SandboxSpec, SandboxStatus,
 };
 
 use crate::instance::{

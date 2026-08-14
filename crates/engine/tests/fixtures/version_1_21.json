@@ -1,0 +1,29 @@
+{
+  "id": "1.21.1",
+  "mainClass": "net.minecraft.client.main.Main",
+  "arguments": {
+    "game": [
+      "--username", "${auth_player_name}",
+      "--version", "${version_name}",
+      "--gameDir", "${game_directory}",
+      "--assetsDir", "${assets_root}",
+      "--assetIndex", "${assets_index_name}",
+      "--uuid", "${auth_uuid}",
+      "--accessToken", "${auth_access_token}",
+      "--userType", "${user_type}",
+      { "rules": [{ "action": "allow", "features": { "is_demo_user": true } }], "value": "--demo" },
+      { "rules": [{ "action": "allow", "features": { "is_quick_play_singleplayer": true } }], "value": ["--quickPlaySingleplayer", "${quickPlaySingleplayer}"] }
+    ],
+    "jvm": [
+      { "rules": [{ "action": "allow", "os": { "name": "osx" } }], "value": ["-XstartOnFirstThread"] },
+      "-Djava.library.path=${natives_directory}",
+      "-cp",
+      "${classpath}"
+    ]
+  },
+  "assetIndex": { "id": "17", "sha1": "abc", "size": 1, "totalSize": 1, "url": "https://example.invalid/17.json" },
+  "assets": "17",
+  "downloads": { "client": { "sha1": "aa", "size": 1, "url": "https://example.invalid/client.jar" } },
+  "javaVersion": { "component": "java-runtime-delta", "majorVersion": 21 },
+  "libraries": []
+}
