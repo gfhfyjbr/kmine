@@ -66,15 +66,47 @@ impl Engine {
 
     pub fn spawn(&self, id: InstanceId, plan: LaunchPlan) -> Result<GameProcessId, EngineError> {
         if plan.sandbox.enabled {
-            return Err(EngineError::SandboxUnavailable {
-                reason: "sandbox not implemented".into(),
-            });
+            if let crate::types::SandboxStatus::Unavailable { reason } =
+                crate::sandbox::sandbox_status()
+            {
+                return Err(EngineError::SandboxUnavailable { reason });
+            }
         }
         if self.processes.lock().contains_key(&id) {
             return Err(EngineError::InstanceBusy);
         }
 
         let tokens = self.redact_tokens.lock().remove(&id).unwrap_or_default();
+        let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
+        self.processes.lock().insert(
+            id,
+            Running {
+                kill: kill_tx,
+                started_at: Instant::now(),
+            },
+        );
+
+        let events = self.events.clone();
+        let processes = Arc::clone(&self.processes);
+        let db = self.paths.db.clone();
+
+        if plan.sandbox.enabled {
+            let mut plan = plan;
+            plan.sandbox = crate::sandbox::fill_spec(&plan, &self.paths);
+            let child = match crate::sandbox::spawn_sandboxed(&plan) {
+                Ok(child) => child,
+                Err(err) => {
+                    self.processes.lock().remove(&id);
+                    return Err(err);
+                }
+            };
+            let pid = child.id();
+            self.rt.spawn(async move {
+                watch_std_process(child, kill_rx, id, tokens, events, processes, db).await;
+            });
+            return Ok(GameProcessId(pid));
+        }
+
         let mut cmd = tokio::process::Command::new(&plan.java);
         cmd.args(&plan.jvm_args)
             .arg(&plan.main_class)
@@ -88,22 +120,16 @@ impl Engine {
             cmd.env(key, value);
         }
 
-        let mut child = cmd.spawn().map_err(|e| EngineError::io(&plan.java, e))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                self.processes.lock().remove(&id);
+                return Err(EngineError::io(&plan.java, e));
+            }
+        };
         let pid = child.id().unwrap_or(0);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
-        self.processes.lock().insert(
-            id,
-            Running {
-                kill: kill_tx,
-                started_at: Instant::now(),
-            },
-        );
-
-        let events = self.events.clone();
-        let processes = Arc::clone(&self.processes);
-        let db = self.paths.db.clone();
         self.rt.spawn(async move {
             watch_process(
                 child, stdout, stderr, kill_rx, id, tokens, events, processes, db,
@@ -358,8 +384,7 @@ impl Engine {
         }
         apply_memory_and_flags(&mut jvm_args, &row)?;
 
-        let java_home = java_home(&java);
-        Ok(LaunchPlan {
+        let mut plan = LaunchPlan {
             java: java.clone(),
             jvm_args,
             main_class: version.main_class,
@@ -370,19 +395,13 @@ impl Engine {
             env: Vec::new(),
             sandbox: SandboxSpec {
                 enabled: row.sandbox,
-                allow_read: vec![
-                    java_home,
-                    self.paths.cache_libraries.clone(),
-                    self.paths.cache_assets_indexes.clone(),
-                    self.paths.cache_assets_objects.clone(),
-                    self.paths.cache_assets_virtual.clone(),
-                    self.paths.cache_runtime.clone(),
-                    java,
-                ],
-                allow_write: vec![cwd, natives_dir],
+                allow_read: Vec::new(),
+                allow_write: Vec::new(),
                 network: true,
             },
-        })
+        };
+        plan.sandbox = crate::sandbox::fill_spec(&plan, &self.paths);
+        Ok(plan)
     }
 
     fn begin_prepare(&self, id: InstanceId) -> Result<PreparingGuard<'_>, EngineError> {
@@ -566,18 +585,6 @@ fn assets_root_path(root: &AssetsRoot) -> PathBuf {
     }
 }
 
-fn java_home(java: &Path) -> PathBuf {
-    let mut home = java.to_path_buf();
-    let name = home.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if name == "java" || name == "java.exe" {
-        home.pop();
-        if home.file_name().and_then(|n| n.to_str()) == Some("bin") {
-            home.pop();
-        }
-    }
-    home
-}
-
 fn exclude_for(version: &VersionInfo, path: &str) -> Vec<String> {
     for lib in &version.libraries {
         let Some(downloads) = &lib.downloads else {
@@ -666,6 +673,104 @@ async fn watch_process(
     let _ = events.send(Event::InstancesChanged);
 }
 
+async fn watch_std_process(
+    mut child: std::process::Child,
+    mut kill_rx: tokio::sync::watch::Receiver<bool>,
+    id: InstanceId,
+    tokens: Vec<String>,
+    events: tokio::sync::broadcast::Sender<Event>,
+    processes: Arc<parking_lot::Mutex<std::collections::HashMap<InstanceId, Running>>>,
+    db: PathBuf,
+) {
+    if let Some(out) = child.stdout.take() {
+        pump_std_lines(out, LogStream::Stdout, id, events.clone(), tokens.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        pump_std_lines(err, LogStream::Stderr, id, events.clone(), tokens.clone());
+    }
+
+    let pid = child.id();
+    if *kill_rx.borrow() {
+        kill_pid(pid);
+    }
+    let mut wait = tokio::task::spawn_blocking(move || child.wait());
+    let status = loop {
+        tokio::select! {
+            res = &mut wait => break res.ok().and_then(Result::ok),
+            changed = kill_rx.changed() => {
+                if changed.is_err() || *kill_rx.borrow() {
+                    kill_pid(pid);
+                }
+            }
+        }
+    };
+
+    let elapsed = {
+        let mut procs = processes.lock();
+        let started = procs
+            .get(&id)
+            .map(|r| r.started_at)
+            .unwrap_or_else(Instant::now);
+        procs.remove(&id);
+        started.elapsed()
+    };
+    record_session(&db, id, elapsed);
+    let code = status.and_then(|s| s.code());
+    let _ = events.send(Event::ProcessExited {
+        instance_id: id,
+        code,
+    });
+    let _ = events.send(Event::InstancesChanged);
+}
+
+fn pump_std_lines(
+    out: impl io::Read + Send + 'static,
+    stream: LogStream,
+    id: InstanceId,
+    events: tokio::sync::broadcast::Sender<Event>,
+    tokens: Vec<String>,
+) {
+    tokio::task::spawn_blocking(move || {
+        use io::BufRead;
+        let reader = io::BufReader::new(out);
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let text = redact_line_with_tokens(&line, &tokens);
+            let _ = events.send(Event::LogLine {
+                instance_id: id,
+                stream,
+                text,
+            });
+        }
+    });
+}
+
+fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = kill(pid as i32, 9);
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
 async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
     reader: R,
     stream: LogStream,
@@ -713,12 +818,11 @@ struct ManifestVersion {
 mod tests {
     use super::VERSION_MANIFEST_URL;
     use crate::error::EngineError;
-    use crate::ids::{InstanceId, Loader};
+    use crate::ids::Loader;
     use crate::mojang::FeatureSet;
     use crate::store::MemoryKeychain;
-    use crate::types::{CreateInstance, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec};
+    use crate::types::{CreateInstance, ProgressSink, QuickPlay};
     use crate::{Engine, LauncherPaths};
-    use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
@@ -735,25 +839,6 @@ mod tests {
         let engine = Engine::open_with_keychain(paths, &kc).unwrap();
         std::mem::forget(root);
         engine
-    }
-
-    fn dummy_plan(sandbox: bool) -> LaunchPlan {
-        LaunchPlan {
-            java: PathBuf::from("java"),
-            jvm_args: Vec::new(),
-            main_class: "x".into(),
-            game_args: Vec::new(),
-            classpath: Vec::new(),
-            natives_dir: PathBuf::from("/tmp"),
-            cwd: PathBuf::from("/tmp"),
-            env: Vec::new(),
-            sandbox: SandboxSpec {
-                enabled: sandbox,
-                allow_read: Vec::new(),
-                allow_write: Vec::new(),
-                network: true,
-            },
-        }
     }
 
     #[test]
@@ -874,17 +959,5 @@ mod tests {
             "forge prepare must proceed past LoaderUnavailable, got {err:?}"
         );
         assert!(matches!(err, EngineError::NoAccount));
-    }
-
-    #[tokio::test]
-    async fn spawn_sandbox_enabled_is_unavailable() {
-        let engine = test_engine().await;
-        let err = engine
-            .spawn(InstanceId::new(), dummy_plan(true))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            EngineError::SandboxUnavailable { reason } if reason == "sandbox not implemented"
-        ));
     }
 }

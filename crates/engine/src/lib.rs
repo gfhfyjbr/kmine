@@ -12,6 +12,7 @@ pub mod mojang;
 pub mod nbt;
 pub mod paths;
 pub mod redact;
+pub mod sandbox;
 pub mod store;
 pub mod types;
 
@@ -162,7 +163,7 @@ impl Engine {
     }
 
     pub fn sandbox_status(&self) -> SandboxStatus {
-        SandboxStatus::Available
+        crate::sandbox::sandbox_status()
     }
 
     pub async fn create_instance(&self, spec: CreateInstance) -> Result<InstanceId, EngineError> {
