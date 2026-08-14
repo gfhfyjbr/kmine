@@ -1,0 +1,9 @@
+pub const CLIENT_ID: &str = "";
+pub const AUTH_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+pub const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+pub const REDIRECT_URL: &str = "http://127.0.0.1:47821/auth";
+pub const BIND: &str = "127.0.0.1:47821";
+pub const XBOX_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
+pub const XSTS_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
+pub const MC_LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
+pub const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";

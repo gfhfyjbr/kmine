@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod error;
 pub mod http;
 pub mod ids;
@@ -26,11 +27,9 @@ use crate::store::Store;
 pub struct Engine {
     paths: LauncherPaths,
     store: parking_lot::Mutex<Store>,
-    #[allow(dead_code)]
     master_key: [u8; 32],
     events: tokio::sync::broadcast::Sender<Event>,
     processes: parking_lot::Mutex<std::collections::HashMap<InstanceId, Running>>,
-    #[allow(dead_code)]
     login_lock: tokio::sync::Mutex<bool>,
 }
 
@@ -216,6 +215,49 @@ impl Engine {
         drop(store);
         self.emit(Event::InstancesChanged);
         Ok(())
+    }
+
+    pub async fn start_login(&self) -> Result<AccountSummary, EngineError> {
+        if crate::auth::CLIENT_ID.is_empty() {
+            return Err(EngineError::AuthNotConfigured);
+        }
+        let _guard = self
+            .login_lock
+            .try_lock()
+            .map_err(|_| EngineError::LoginInProgress)?;
+
+        let listener = std::net::TcpListener::bind(crate::auth::BIND)
+            .map_err(|e| EngineError::io(crate::auth::BIND, e))?;
+        let request = crate::auth::oauth::authorize_request()?;
+        open::that(request.url.as_str()).map_err(|e| {
+            EngineError::io(
+                std::path::PathBuf::from("browser"),
+                std::io::Error::other(e.to_string()),
+            )
+        })?;
+        let callback =
+            tokio::task::spawn_blocking(move || crate::auth::oauth::wait_for_callback(listener))
+                .await
+                .map_err(|e| {
+                    EngineError::io(crate::auth::BIND, std::io::Error::other(e.to_string()))
+                })??;
+        if callback.state != request.state {
+            return Err(EngineError::AuthFailed {
+                message: "oauth state mismatch".into(),
+            });
+        }
+
+        let http = HttpFiles::new()?;
+        let endpoints = crate::auth::AuthEndpoints::production();
+        let (record, secrets) =
+            crate::auth::complete_login(&http, &callback.code, &request.pkce_verifier, &endpoints)
+                .await?;
+        let summary = {
+            let store = self.store.lock();
+            crate::auth::persist_login(&store, &self.master_key, &record, &secrets)?
+        };
+        self.emit(Event::AccountsChanged);
+        Ok(summary)
     }
 
     pub async fn select_account(&self, id: AccountId) -> Result<(), EngineError> {
