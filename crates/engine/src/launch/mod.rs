@@ -1,5 +1,9 @@
 use crate::auth::{AccountSecrets, AuthEndpoints, TokenPersist, ensure_mc_token_owned, secret_id};
 use crate::error::EngineError;
+use crate::fabric::{
+    FabricLoaderIndex, FabricProfile, LOADER_INDEX_URL, merge_fabric, pick_loader_version,
+    profile_url,
+};
 use crate::http::HttpFiles;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::instance_not_found;
@@ -131,7 +135,7 @@ impl Engine {
                 .ok_or_else(|| instance_not_found(&self.paths))?
         };
 
-        if row.loader != Loader::Vanilla {
+        if !matches!(row.loader, Loader::Vanilla | Loader::Fabric) {
             return Err(EngineError::LoaderUnavailable {
                 loader: row.loader,
                 minecraft: row.minecraft_version,
@@ -201,6 +205,11 @@ impl Engine {
             .await?;
         progress.set("Version", 1, 1);
         let version: VersionInfo = read_json(&version_path)?;
+        let version = if row.loader == Loader::Fabric {
+            merge_fabric_profile(&http, &row, version, progress, cancel).await?
+        } else {
+            version
+        };
 
         check_cancel(cancel)?;
         let custom = row.java_path.as_ref().map(PathBuf::from);
@@ -368,6 +377,43 @@ impl Engine {
             id,
         })
     }
+}
+
+async fn merge_fabric_profile(
+    http: &HttpFiles,
+    row: &InstanceRow,
+    vanilla: VersionInfo,
+    progress: &dyn ProgressSink,
+    cancel: &CancellationToken,
+) -> Result<VersionInfo, EngineError> {
+    check_cancel(cancel)?;
+    progress.set("Fabric loader", 0, 2);
+    let index: FabricLoaderIndex = http.get_json(LOADER_INDEX_URL, cancel).await?;
+    let loader = match pick_loader_version(&index, row.loader_version.as_deref()) {
+        Ok(version) => version,
+        Err(EngineError::LoaderUnavailable { loader, .. }) => {
+            return Err(EngineError::LoaderUnavailable {
+                loader,
+                minecraft: row.minecraft_version.clone(),
+            });
+        }
+        Err(err) => return Err(err),
+    };
+    progress.set("Fabric loader", 1, 2);
+    check_cancel(cancel)?;
+    let url = profile_url(&row.minecraft_version, &loader);
+    let profile: FabricProfile = match http.get_json(&url, cancel).await {
+        Ok(profile) => profile,
+        Err(EngineError::Http { status: 404, .. }) => {
+            return Err(EngineError::LoaderUnavailable {
+                loader: Loader::Fabric,
+                minecraft: row.minecraft_version.clone(),
+            });
+        }
+        Err(err) => return Err(err),
+    };
+    progress.set("Fabric loader", 2, 2);
+    Ok(merge_fabric(vanilla, profile))
 }
 
 fn check_cancel(cancel: &CancellationToken) -> Result<(), EngineError> {
@@ -701,7 +747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_fabric_not_yet() {
+    async fn prepare_fabric_offline_errors_without_account() {
         let engine = test_engine().await;
         let id = engine
             .create_instance(CreateInstance {
@@ -717,13 +763,17 @@ mod tests {
             .prepare(id, &NoopProgress, CancellationToken::new(), None)
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            EngineError::LoaderUnavailable {
-                loader: Loader::Fabric,
-                ..
-            }
-        ));
+        assert!(
+            !matches!(
+                err,
+                EngineError::LoaderUnavailable {
+                    loader: Loader::Fabric,
+                    ..
+                }
+            ),
+            "fabric prepare must proceed past LoaderUnavailable, got {err:?}"
+        );
+        assert!(matches!(err, EngineError::NoAccount));
     }
 
     #[tokio::test]

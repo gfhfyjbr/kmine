@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod error;
+pub mod fabric;
 pub mod http;
 pub mod ids;
 pub mod instance;
