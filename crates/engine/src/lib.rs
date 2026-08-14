@@ -2,6 +2,7 @@ pub mod error;
 pub mod http;
 pub mod ids;
 pub mod instance;
+pub mod java;
 pub mod mojang;
 pub mod paths;
 pub mod store;
