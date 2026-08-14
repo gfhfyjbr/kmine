@@ -1,4 +1,5 @@
 use crate::ids::{AccountId, InstanceId, Loader};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
@@ -34,4 +35,84 @@ pub struct InstanceRow {
     pub last_played_at: Option<i64>,
     pub playtime_secs: i64,
     pub session_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateInstance {
+    pub name: String,
+    pub minecraft_version: String,
+    pub loader: Loader,
+    pub loader_version: Option<String>,
+    pub icon_png: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InstancePatch {
+    pub memory_min_mb: Option<Option<u32>>,
+    pub memory_max_mb: Option<Option<u32>>,
+    pub jvm_flags: Option<Option<String>>,
+    pub java_path: Option<Option<PathBuf>>,
+    pub sandbox: Option<bool>,
+    pub account_uuid: Option<Option<AccountId>>,
+    pub icon_png: Option<Option<Vec<u8>>>,
+    pub minecraft_version: Option<String>,
+    pub loader: Option<Loader>,
+    pub loader_version: Option<Option<String>>,
+}
+
+impl InstancePatch {
+    pub(crate) fn apply(self, row: &mut InstanceRow) {
+        if let Some(v) = self.memory_min_mb {
+            row.memory_min_mb = v.map(i64::from);
+        }
+        if let Some(v) = self.memory_max_mb {
+            row.memory_max_mb = v.map(i64::from);
+        }
+        if let Some(v) = self.jvm_flags {
+            row.jvm_flags = v;
+        }
+        if let Some(v) = self.java_path {
+            row.java_path = v.map(|p| p.to_string_lossy().into_owned());
+        }
+        if let Some(v) = self.sandbox {
+            row.sandbox = v;
+        }
+        if let Some(v) = self.account_uuid {
+            row.account_uuid = v;
+        }
+        if let Some(v) = self.icon_png {
+            row.icon_png = v;
+        }
+        if let Some(v) = self.minecraft_version {
+            row.minecraft_version = v;
+        }
+        if let Some(v) = self.loader {
+            row.loader = v;
+        }
+        if let Some(v) = self.loader_version {
+            row.loader_version = v;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceSummary {
+    pub id: InstanceId,
+    pub slug: String,
+    pub name: String,
+    pub minecraft_version: String,
+    pub loader: Loader,
+    pub last_played_at: Option<i64>,
+    pub playtime_secs: u64,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxStatus {
+    Available,
+    Unavailable { reason: String },
+}
+
+pub trait ProgressSink: Send + Sync {
+    fn set(&self, title: &str, done: u64, total: u64);
 }
