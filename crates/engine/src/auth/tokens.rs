@@ -400,6 +400,13 @@ async fn minecraft_login(
         .await
         .map_err(|e| io_http(&endpoints.mc_login_url, e))?;
     let status = resp.status();
+    if status.as_u16() == 403 {
+        return Err(EngineError::AuthFailed {
+            message: format!(
+                "Minecraft blocked this Azure app (403). Request API access at https://aka.ms/mce-reviewappid with client id {CLIENT_ID}"
+            ),
+        });
+    }
     if !status.is_success() {
         return Err(EngineError::Http {
             url: endpoints.mc_login_url.clone(),
