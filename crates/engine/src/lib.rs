@@ -1,4 +1,5 @@
 pub mod error;
+pub mod http;
 pub mod ids;
 pub mod instance;
 pub mod mojang;
@@ -7,6 +8,7 @@ pub mod store;
 pub mod types;
 
 pub use error::EngineError;
+pub use http::HttpFiles;
 pub use ids::{AccountId, InstanceId, Loader};
 pub use paths::LauncherPaths;
 pub use store::{Keychain, MemoryKeychain, OsKeychain};
