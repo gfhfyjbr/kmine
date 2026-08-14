@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -11,13 +12,22 @@ use gpui_component::{
     h_flex, v_flex,
 };
 use kmine_engine::{
-    AccountId, CancellationToken, Engine, EngineError, Event, InstanceId, InstanceSummary,
+    AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
+    InstanceId, InstancePatch, InstanceSummary, SandboxStatus,
 };
 
 use crate::modals::accounts::{self, AccountsModal};
 use crate::modals::create_instance::{self, CreateInstanceForm};
 use crate::modals::progress::{self, EventProgressSink, ProgressModal};
-use crate::screens::{instance_play, instances};
+use crate::screens::{instance_content, instance_play, instance_settings, instances};
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum InstancePane {
+    #[default]
+    Play,
+    Content,
+    Settings,
+}
 
 pub struct KmineApp {
     engine: Arc<Engine>,
@@ -31,6 +41,11 @@ pub struct KmineApp {
     accounts: AccountsModal,
     progress: Option<ProgressModal>,
     cancel: Option<CancellationToken>,
+    instance_pane: InstancePane,
+    content_mods: Vec<ContentEntry>,
+    content_resourcepacks: Vec<ContentEntry>,
+    content_shaderpacks: Vec<ContentEntry>,
+    settings: Option<instance_settings::SettingsForm>,
 }
 
 impl KmineApp {
@@ -49,6 +64,11 @@ impl KmineApp {
             accounts,
             progress: None,
             cancel: None,
+            instance_pane: InstancePane::Play,
+            content_mods: Vec::new(),
+            content_resourcepacks: Vec::new(),
+            content_shaderpacks: Vec::new(),
+            settings: None,
         };
         this.listen_engine_events(cx);
         this
@@ -65,6 +85,141 @@ impl KmineApp {
     fn selected_instance(&self) -> Option<&InstanceSummary> {
         let id = self.selected?;
         self.instances.iter().find(|instance| instance.id == id)
+    }
+
+    fn select_instance(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        self.reload_content();
+        if self.instance_pane == InstancePane::Settings {
+            self.load_settings(id, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn set_pane(&mut self, pane: InstancePane, window: &mut Window, cx: &mut Context<Self>) {
+        self.instance_pane = pane;
+        match pane {
+            InstancePane::Play => {}
+            InstancePane::Content => self.reload_content(),
+            InstancePane::Settings => {
+                if let Some(id) = self.selected {
+                    self.load_settings(id, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn reload_content(&mut self) {
+        let Some(id) = self.selected else {
+            self.content_mods.clear();
+            self.content_resourcepacks.clear();
+            self.content_shaderpacks.clear();
+            return;
+        };
+        self.content_mods = self
+            .engine
+            .list_content(id, ContentFolder::Mods)
+            .unwrap_or_default();
+        self.content_resourcepacks = self
+            .engine
+            .list_content(id, ContentFolder::Resourcepacks)
+            .unwrap_or_default();
+        self.content_shaderpacks = self
+            .engine
+            .list_content(id, ContentFolder::Shaderpacks)
+            .unwrap_or_default();
+    }
+
+    fn load_settings(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
+        match self.engine.get_instance(id) {
+            Ok(Some(row)) => {
+                self.settings = Some(instance_settings::SettingsForm::from_row(
+                    &row,
+                    &self.accounts.accounts,
+                    window,
+                    cx,
+                ));
+            }
+            Ok(None) => {
+                self.settings = None;
+                self.status = "instance not found".into();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+    }
+
+    fn apply_patch(&mut self, id: InstanceId, patch: InstancePatch, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.update_instance(id, patch).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(())) => this.status.clear(),
+                    Ok(Err(err)) => this.status = err.to_string(),
+                    Err(err) => this.status = err.to_string(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.settings.as_ref() else {
+            return;
+        };
+        let id = form.instance_id;
+        let patch = form.patch(cx);
+        self.apply_patch(id, patch, cx);
+    }
+
+    fn set_sandbox(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let Some(form) = self.settings.as_mut() else {
+            return;
+        };
+        form.sandbox = enabled;
+        let id = form.instance_id;
+        self.apply_patch(
+            id,
+            InstancePatch {
+                sandbox: Some(enabled),
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    fn toggle_content(&mut self, path: PathBuf, enabled: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        match self.engine.set_content_enabled(id, &path, enabled) {
+            Ok(()) => {
+                self.status.clear();
+                self.reload_content();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+        cx.notify();
+    }
+
+    fn delete_content(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        match self.engine.delete_content(id, &path) {
+            Ok(()) => {
+                self.status.clear();
+                self.reload_content();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+        cx.notify();
     }
 
     fn listen_engine_events(&self, cx: &mut Context<Self>) {
@@ -104,7 +259,16 @@ impl KmineApp {
     fn handle_engine_event(&mut self, event: Event) {
         match event {
             Event::AccountsChanged => self.refresh_accounts(),
-            Event::InstancesChanged => self.refresh_instances(),
+            Event::InstancesChanged => {
+                self.refresh_instances();
+                if let Some(id) = self.selected {
+                    if !self.instances.iter().any(|instance| instance.id == id) {
+                        self.selected = None;
+                        self.settings = None;
+                    }
+                }
+                self.reload_content();
+            }
             Event::Progress {
                 id,
                 title,
@@ -182,6 +346,7 @@ impl KmineApp {
                         this.create = None;
                         this.selected = Some(id);
                         this.refresh_instances();
+                        this.reload_content();
                         this.status.clear();
                     }
                     Ok(Err(err)) => this.status = err.to_string(),
@@ -377,10 +542,15 @@ impl KmineApp {
 
 impl Render for KmineApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.instance_pane == InstancePane::Content && self.selected.is_some() {
+            self.reload_content();
+        }
         let this = cx.weak_entity();
         let selected = self.selected_instance().cloned();
         let identity = self.accounts.identity_label().to_string();
         let status = self.status.clone();
+        let pane = self.instance_pane;
+        let sandbox_status = self.engine.sandbox_status();
 
         div()
             .size_full()
@@ -400,10 +570,9 @@ impl Render for KmineApp {
                                 self.selected,
                                 {
                                     let this = this.clone();
-                                    move |id, _, cx| {
+                                    move |id, window, cx| {
                                         this.update(cx, |this, cx| {
-                                            this.selected = Some(id);
-                                            cx.notify();
+                                            this.select_instance(id, window, cx);
                                         })
                                         .ok();
                                     }
@@ -424,22 +593,19 @@ impl Render for KmineApp {
                                     .min_w_0()
                                     .bg(cx.theme().background)
                                     .child(match selected {
-                                        Some(instance) => {
-                                            let id = instance.id;
-                                            let this = this.clone();
-                                            instance_play::play_tab(
-                                                &instance,
-                                                &status,
-                                                move |_, _, cx| {
-                                                    this.update(cx, |this, cx| {
-                                                        this.play_or_stop(id, cx);
-                                                    })
-                                                    .ok();
-                                                },
-                                                cx,
-                                            )
-                                            .into_any_element()
-                                        }
+                                        Some(instance) => right_pane(
+                                            &instance,
+                                            pane,
+                                            &status,
+                                            &self.content_mods,
+                                            &self.content_resourcepacks,
+                                            &self.content_shaderpacks,
+                                            self.settings.as_ref(),
+                                            &sandbox_status,
+                                            this.clone(),
+                                            cx,
+                                        )
+                                        .into_any_element(),
                                         None => empty_state(cx).into_any_element(),
                                     }),
                             ),
@@ -522,6 +688,163 @@ impl Render for KmineApp {
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+    }
+}
+
+fn right_pane(
+    instance: &InstanceSummary,
+    pane: InstancePane,
+    status: &str,
+    mods: &[ContentEntry],
+    resourcepacks: &[ContentEntry],
+    shaderpacks: &[ContentEntry],
+    settings: Option<&instance_settings::SettingsForm>,
+    sandbox_status: &SandboxStatus,
+    this: WeakEntity<KmineApp>,
+    cx: &App,
+) -> impl IntoElement {
+    let id = instance.id;
+    v_flex()
+        .size_full()
+        .min_w_0()
+        .child(pane_switcher(pane, this.clone(), cx))
+        .child(match pane {
+            InstancePane::Play => {
+                let this = this.clone();
+                instance_play::play_tab(
+                    instance,
+                    status,
+                    move |_, _, cx| {
+                        this.update(cx, |this, cx| {
+                            this.play_or_stop(id, cx);
+                        })
+                        .ok();
+                    },
+                    cx,
+                )
+                .into_any_element()
+            }
+            InstancePane::Content => instance_content::content_tab(
+                mods,
+                resourcepacks,
+                shaderpacks,
+                {
+                    let this = this.clone();
+                    move |path, enabled, _, cx| {
+                        this.update(cx, |this, cx| {
+                            this.toggle_content(path, enabled, cx);
+                        })
+                        .ok();
+                    }
+                },
+                {
+                    let this = this.clone();
+                    move |path, _, _, cx| {
+                        this.update(cx, |this, cx| {
+                            this.delete_content(path, cx);
+                        })
+                        .ok();
+                    }
+                },
+                cx,
+            )
+            .into_any_element(),
+            InstancePane::Settings => match settings {
+                Some(form) => instance_settings::settings_tab(
+                    form,
+                    sandbox_status,
+                    status,
+                    {
+                        let this = this.clone();
+                        move |enabled, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.set_sandbox(enabled, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.save_settings(cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    cx,
+                )
+                .into_any_element(),
+                None => empty_state(cx).into_any_element(),
+            },
+        })
+}
+
+fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> impl IntoElement {
+    h_flex()
+        .id("instance-pane-switcher")
+        .w_full()
+        .px_4()
+        .pt_3()
+        .gap_1()
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(pane_button(
+            "pane-play",
+            "Play",
+            pane == InstancePane::Play,
+            {
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.set_pane(InstancePane::Play, window, cx);
+                    })
+                    .ok();
+                }
+            },
+        ))
+        .child(pane_button(
+            "pane-content",
+            "Content",
+            pane == InstancePane::Content,
+            {
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.set_pane(InstancePane::Content, window, cx);
+                    })
+                    .ok();
+                }
+            },
+        ))
+        .child(pane_button(
+            "pane-settings",
+            "Settings",
+            pane == InstancePane::Settings,
+            {
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.set_pane(InstancePane::Settings, window, cx);
+                    })
+                    .ok();
+                }
+            },
+        ))
+}
+
+fn pane_button(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let button = Button::new(id).label(label).on_click(on_click);
+    if active {
+        button.primary()
+    } else {
+        button.ghost()
     }
 }
 

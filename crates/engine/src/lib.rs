@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod content;
 pub mod error;
 pub mod fabric;
 pub mod forge;
@@ -22,8 +23,9 @@ pub use redact::redact_line;
 pub use store::{Keychain, MemoryKeychain, OsKeychain};
 pub use tokio_util::sync::CancellationToken;
 pub use types::{
-    AccountRecord, AccountSummary, CreateInstance, GameProcessId, InstancePatch, InstanceRow,
-    InstanceSummary, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec, SandboxStatus,
+    AccountRecord, AccountSummary, ContentEntry, ContentFolder, CreateInstance, GameProcessId,
+    InstancePatch, InstanceRow, InstanceSummary, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec,
+    SandboxStatus,
 };
 
 use crate::instance::{
@@ -152,6 +154,10 @@ impl Engine {
                 running: processes.contains_key(&row.id),
             })
             .collect())
+    }
+
+    pub fn get_instance(&self, id: InstanceId) -> Result<Option<InstanceRow>, EngineError> {
+        self.store.lock().get_instance(id)
     }
 
     pub fn sandbox_status(&self) -> SandboxStatus {

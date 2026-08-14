@@ -1,6 +1,30 @@
 use crate::ids::{AccountId, InstanceId, Loader};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentFolder {
+    Mods,
+    Resourcepacks,
+    Shaderpacks,
+}
+
+impl ContentFolder {
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            Self::Mods => "mods",
+            Self::Resourcepacks => "resourcepacks",
+            Self::Shaderpacks => "shaderpacks",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
     pub uuid: AccountId,
