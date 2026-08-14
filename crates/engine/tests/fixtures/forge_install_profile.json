@@ -1,0 +1,30 @@
+{
+  "spec": 1,
+  "version": "1.21.1-forge-52.0.0",
+  "minecraft": "1.21.1",
+  "data": {
+    "BINPATCH": {
+      "client": "/data/client.lzma",
+      "server": "/data/server.lzma"
+    },
+    "MAPPINGS": {
+      "client": "[net.minecraft:client:1.21.1:mappings@txt]",
+      "server": "[net.minecraft:server:1.21.1:mappings@txt]"
+    }
+  },
+  "processors": [
+    {
+      "sides": ["client"],
+      "jar": "net.minecraftforge:installertools:1.4.1",
+      "classpath": ["net.minecraftforge:srgutils:0.5.6"],
+      "args": ["--task", "BINARYPATCH", "--clean", "{MINECRAFT_JAR}", "--output", "{MAPPINGS}"]
+    },
+    {
+      "sides": ["server"],
+      "jar": "net.minecraftforge:installertools:1.4.1",
+      "classpath": [],
+      "args": ["--task", "SERVER"]
+    }
+  ],
+  "libraries": []
+}

@@ -1,0 +1,24 @@
+{
+  "id": "1.21.1-forge-52.0.0",
+  "mainClass": "cpw.mods.bootstraplauncher.BootstrapLauncher",
+  "inheritsFrom": "1.21.1",
+  "arguments": {
+    "game": [],
+    "jvm": [
+      "-DlibraryDirectory=${library_directory}"
+    ]
+  },
+  "libraries": [
+    {
+      "name": "net.minecraftforge:forge:1.21.1-52.0.0",
+      "downloads": {
+        "artifact": {
+          "path": "net/minecraftforge/forge/1.21.1-52.0.0/forge-1.21.1-52.0.0.jar",
+          "url": "https://maven.minecraftforge.net/net/minecraftforge/forge/1.21.1-52.0.0/forge-1.21.1-52.0.0.jar",
+          "sha1": "deadbeef",
+          "size": 1
+        }
+      }
+    }
+  ]
+}
