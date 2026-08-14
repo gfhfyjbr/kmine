@@ -3,8 +3,8 @@ mod keychain;
 mod migrate;
 
 use crate::error::EngineError;
-use crate::ids::AccountId;
-use crate::types::AccountRecord;
+use crate::ids::{AccountId, InstanceId, Loader};
+use crate::types::{AccountRecord, InstanceRow};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -178,14 +178,182 @@ impl Store {
         };
         self.set_config("selected_account", &value)
     }
+
+    pub fn insert_instance(&self, row: &InstanceRow) -> Result<(), EngineError> {
+        self.conn.execute(
+            "INSERT INTO instances(
+                id, slug, name, minecraft_version, loader, loader_version,
+                account_uuid, memory_min_mb, memory_max_mb, jvm_flags, java_path,
+                sandbox, icon_png, created_at, last_played_at, playtime_secs, session_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            rusqlite::params![
+                row.id.as_hyphenated(),
+                row.slug,
+                row.name,
+                row.minecraft_version,
+                row.loader.as_str(),
+                row.loader_version,
+                row.account_uuid.as_ref().map(AccountId::as_hyphenated),
+                row.memory_min_mb,
+                row.memory_max_mb,
+                row.jvm_flags,
+                row.java_path,
+                row.sandbox,
+                row.icon_png,
+                row.created_at,
+                row.last_played_at,
+                row.playtime_secs,
+                row.session_count,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_instance(&self, id: InstanceId) -> Result<Option<InstanceRow>, EngineError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, slug, name, minecraft_version, loader, loader_version,
+                    account_uuid, memory_min_mb, memory_max_mb, jvm_flags, java_path,
+                    sandbox, icon_png, created_at, last_played_at, playtime_secs, session_count
+             FROM instances WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query([id.as_hyphenated()])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(instance_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_instances(&self) -> Result<Vec<InstanceRow>, EngineError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, slug, name, minecraft_version, loader, loader_version,
+                    account_uuid, memory_min_mb, memory_max_mb, jvm_flags, java_path,
+                    sandbox, icon_png, created_at, last_played_at, playtime_secs, session_count
+             FROM instances
+             ORDER BY last_played_at DESC NULLS LAST, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], instance_from_row)?;
+        let mut recs = Vec::new();
+        for row in rows {
+            recs.push(row?);
+        }
+        Ok(recs)
+    }
+
+    pub fn update_instance(&self, row: &InstanceRow) -> Result<(), EngineError> {
+        self.conn.execute(
+            "UPDATE instances SET
+                slug = ?2,
+                name = ?3,
+                minecraft_version = ?4,
+                loader = ?5,
+                loader_version = ?6,
+                account_uuid = ?7,
+                memory_min_mb = ?8,
+                memory_max_mb = ?9,
+                jvm_flags = ?10,
+                java_path = ?11,
+                sandbox = ?12,
+                icon_png = ?13,
+                created_at = ?14,
+                last_played_at = ?15,
+                playtime_secs = ?16,
+                session_count = ?17
+             WHERE id = ?1",
+            rusqlite::params![
+                row.id.as_hyphenated(),
+                row.slug,
+                row.name,
+                row.minecraft_version,
+                row.loader.as_str(),
+                row.loader_version,
+                row.account_uuid.as_ref().map(AccountId::as_hyphenated),
+                row.memory_min_mb,
+                row.memory_max_mb,
+                row.jvm_flags,
+                row.java_path,
+                row.sandbox,
+                row.icon_png,
+                row.created_at,
+                row.last_played_at,
+                row.playtime_secs,
+                row.session_count,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_instance(&self, id: InstanceId) -> Result<(), EngineError> {
+        self.conn
+            .execute("DELETE FROM instances WHERE id = ?1", [id.as_hyphenated()])?;
+        Ok(())
+    }
+
+    pub fn list_slugs(&self) -> Result<Vec<String>, EngineError> {
+        let mut stmt = self.conn.prepare("SELECT slug FROM instances")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut slugs = Vec::new();
+        for row in rows {
+            slugs.push(row?);
+        }
+        Ok(slugs)
+    }
+}
+
+fn loader_from_db(s: &str) -> Result<Loader, rusqlite::Error> {
+    match s {
+        "vanilla" => Ok(Loader::Vanilla),
+        "fabric" => Ok(Loader::Fabric),
+        "forge" => Ok(Loader::Forge),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, s)),
+        )),
+    }
+}
+
+fn parse_uuid_at(idx: usize, s: &str) -> Result<uuid::Uuid, rusqlite::Error> {
+    uuid::Uuid::parse_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceRow> {
+    let id_str: String = row.get(0)?;
+    let id = InstanceId(parse_uuid_at(0, &id_str)?);
+    let loader_str: String = row.get(4)?;
+    let loader = loader_from_db(&loader_str)?;
+    let account_uuid = match row.get::<_, Option<String>>(6)? {
+        Some(s) => Some(AccountId(parse_uuid_at(6, &s)?)),
+        None => None,
+    };
+    Ok(InstanceRow {
+        id,
+        slug: row.get(1)?,
+        name: row.get(2)?,
+        minecraft_version: row.get(3)?,
+        loader,
+        loader_version: row.get(5)?,
+        account_uuid,
+        memory_min_mb: row.get(7)?,
+        memory_max_mb: row.get(8)?,
+        jvm_flags: row.get(9)?,
+        java_path: row.get(10)?,
+        sandbox: row.get(11)?,
+        icon_png: row.get(12)?,
+        created_at: row.get(13)?,
+        last_played_at: row.get(14)?,
+        playtime_secs: row.get(15)?,
+        session_count: row.get(16)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::Store;
     use super::keychain::MemoryKeychain;
-    use crate::ids::AccountId;
-    use crate::types::AccountRecord;
+    use crate::ids::{AccountId, InstanceId, Loader};
+    use crate::types::{AccountRecord, InstanceRow};
     use std::path::Path;
 
     fn open_mem() -> Store {
@@ -291,5 +459,36 @@ mod tests {
         let (store, _key) = Store::open(Path::new(":memory:"), &kc).unwrap();
         let id = AccountId(uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap());
         store.delete_account(id).unwrap();
+    }
+
+    #[test]
+    fn insert_and_list_instance() {
+        let kc = MemoryKeychain::new();
+        let (store, _) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        let id = InstanceId::new();
+        store
+            .insert_instance(&InstanceRow {
+                id,
+                slug: "A".into(),
+                name: "A".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                account_uuid: None,
+                memory_min_mb: None,
+                memory_max_mb: Some(4096),
+                jvm_flags: None,
+                java_path: None,
+                sandbox: false,
+                icon_png: None,
+                created_at: 1,
+                last_played_at: None,
+                playtime_secs: 0,
+                session_count: 0,
+            })
+            .unwrap();
+        let list = store.list_instances().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].minecraft_version, "1.21.1");
     }
 }
