@@ -1,4 +1,4 @@
-pub const CLIENT_ID: &str = "";
+pub const CLIENT_ID: &str = "426346bc-d0fc-4222-983c-1a6d20e6342d";
 pub const AUTH_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
 pub const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 pub const REDIRECT_URL: &str = "http://127.0.0.1:47821/auth";
