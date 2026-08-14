@@ -3,6 +3,8 @@ mod keychain;
 mod migrate;
 
 use crate::error::EngineError;
+use crate::ids::AccountId;
+use crate::types::AccountRecord;
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -106,12 +108,84 @@ impl Store {
             .execute("DELETE FROM secrets WHERE id = ?1", [id])?;
         Ok(())
     }
+
+    pub fn upsert_account(&self, rec: &AccountRecord) -> Result<(), EngineError> {
+        self.conn.execute(
+            "INSERT INTO accounts(uuid, username, added_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(uuid) DO UPDATE SET username = excluded.username, last_used_at = excluded.last_used_at",
+            rusqlite::params![
+                rec.uuid.as_hyphenated(),
+                rec.username,
+                rec.added_at,
+                rec.last_used_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<AccountRecord>, EngineError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, username, added_at, last_used_at FROM accounts ORDER BY added_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let uuid_str: String = row.get(0)?;
+            let uuid = uuid::Uuid::parse_str(&uuid_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
+            Ok(AccountRecord {
+                uuid: AccountId(uuid),
+                username: row.get(1)?,
+                added_at: row.get(2)?,
+                last_used_at: row.get(3)?,
+            })
+        })?;
+        let mut recs = Vec::new();
+        for row in rows {
+            recs.push(row?);
+        }
+        Ok(recs)
+    }
+
+    pub fn delete_account(&self, id: AccountId) -> Result<(), EngineError> {
+        let uuid = id.as_hyphenated();
+        let secret_id = format!("account/{uuid}");
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM secrets WHERE id = ?1", [&secret_id])?;
+        tx.execute("DELETE FROM accounts WHERE uuid = ?1", [&uuid])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn selected_account(&self) -> Result<Option<AccountId>, EngineError> {
+        let Some(raw) = self.get_config("selected_account")? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&raw).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                .into()
+        })
+    }
+
+    pub fn set_selected_account(&self, id: Option<AccountId>) -> Result<(), EngineError> {
+        let value = match id {
+            Some(id) => format!("\"{}\"", id.as_hyphenated()),
+            None => "null".into(),
+        };
+        self.set_config("selected_account", &value)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Store;
     use super::keychain::MemoryKeychain;
+    use crate::ids::AccountId;
+    use crate::types::AccountRecord;
     use std::path::Path;
 
     fn open_mem() -> Store {
@@ -179,5 +253,43 @@ mod tests {
         let kc = MemoryKeychain::new();
         let (store, key) = Store::open(Path::new(":memory:"), &kc).unwrap();
         assert!(store.get_secret(&key, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_list_select_delete_account() {
+        let kc = MemoryKeychain::new();
+        let (store, key) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        let id = AccountId(uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap());
+        store
+            .upsert_account(&AccountRecord {
+                uuid: id,
+                username: "Steve".into(),
+                added_at: 10,
+                last_used_at: None,
+            })
+            .unwrap();
+        store
+            .put_secret(&key, &format!("account/{}", id.as_hyphenated()), b"{}")
+            .unwrap();
+        store.set_selected_account(Some(id)).unwrap();
+        assert_eq!(store.list_accounts().unwrap().len(), 1);
+        assert_eq!(store.selected_account().unwrap(), Some(id));
+        store.delete_account(id).unwrap();
+        assert!(store.list_accounts().unwrap().is_empty());
+        assert!(
+            store
+                .get_secret(&key, &format!("account/{}", id.as_hyphenated()))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.selected_account().unwrap(), Some(id)); // config left as-is; Engine clears it in Task 7
+    }
+
+    #[test]
+    fn delete_account_sets_nothing_if_missing() {
+        let kc = MemoryKeychain::new();
+        let (store, _key) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        let id = AccountId(uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap());
+        store.delete_account(id).unwrap();
     }
 }
