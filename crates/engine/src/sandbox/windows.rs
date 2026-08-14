@@ -1,19 +1,22 @@
 //! AppContainer jail from Microsoft's "Launch an AppContainer" sample:
-//! `CreateAppContainerProfile`, capability SIDs, DACLs, `CreateProcess`.
+//! `CreateAppContainerProfile`, capability SIDs, DACLs, `STARTUPINFOEX`
+//! + `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`.
 
-use super::{apply_plan_stdio, instance_slug};
+use super::instance_slug;
 use crate::error::EngineError;
 use crate::types::LaunchPlan;
 use sha1::{Digest, Sha1};
-use std::ffi::OsStr;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
+use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, HANDLE,
-    LocalFree,
+    CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
@@ -24,57 +27,188 @@ use windows::Win32::Security::Isolation::{
 };
 use windows::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName, FreeSid, PSECURITY_DESCRIPTOR,
-    PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_QUERY_INFORMATION, THREAD_SET_INFORMATION,
-    THREAD_SUSPEND_RESUME,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
+    STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
-use windows::core::{PCWSTR, PWSTR, s, w};
+use windows::core::{PCWSTR, PWSTR};
 
 const SE_GROUP_ENABLED: u32 = 4;
-const PROCESS_ACCESS_TOKEN: u32 = 9;
-const CREATE_SUSPENDED_FLAG: u32 = CREATE_SUSPENDED.0;
 
-#[repr(C)]
-struct ProcessAccessToken {
-    token: HANDLE,
-    thread: HANDLE,
+static JAILS: parking_lot::Mutex<HashMap<u32, Jail>> = parking_lot::Mutex::new(HashMap::new());
+
+struct Jail {
+    java_pid: u32,
+    process: HANDLE,
 }
 
-type CreateAppContainerTokenFn = unsafe extern "system" fn(
-    HANDLE,
-    *const SECURITY_CAPABILITIES,
-    *mut HANDLE,
-) -> windows::core::HRESULT;
+unsafe impl Send for Jail {}
 
-type NtSetInformationProcessFn =
-    unsafe extern "system" fn(HANDLE, u32, *const ProcessAccessToken, u32) -> i32;
-
-pub(super) fn spawn(plan: &LaunchPlan) -> Result<std::process::Child, EngineError> {
+pub(super) fn spawn(plan: &LaunchPlan) -> Result<Child, EngineError> {
     let name = appcontainer_name(plan);
     let mut session = AppContainer::create(&name, plan.sandbox.network)?;
     session.grant_paths(plan)?;
+    let launched = create_appcontainer_process(plan, &mut session)?;
+    adopt_child(launched)
+}
 
-    let mut cmd = Command::new(&plan.java);
-    apply_plan_stdio(&mut cmd, plan);
-    cmd.creation_flags(CREATE_SUSPENDED_FLAG);
-    let mut child = cmd.spawn().map_err(|e| EngineError::io(&plan.java, e))?;
-    if let Err(err) = session.apply_to_child(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
+pub(super) fn jailed_pid(child: &Child) -> Option<u32> {
+    JAILS.lock().get(&child.id()).map(|j| j.java_pid)
+}
+
+pub(super) fn wait_jailed(mut child: Child) -> io::Result<ExitStatus> {
+    let marker_pid = child.id();
+    let jail = JAILS.lock().remove(&marker_pid);
+    let Some(jail) = jail else {
+        return child.wait();
+    };
+    let wait = unsafe { WaitForSingleObject(jail.process, INFINITE) };
+    if wait != WAIT_OBJECT_0 {
+        drop(child);
+        return Err(io::Error::last_os_error());
     }
-    if let Err(err) = resume_process(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(jail.process, &mut code) }
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let _ = child.wait();
+    Ok(ExitStatus::from_raw(code))
+}
+
+struct Launched {
+    pid: u32,
+    process: HANDLE,
+    stdout: OwnedHandle,
+    stderr: OwnedHandle,
+}
+
+fn create_appcontainer_process(
+    plan: &LaunchPlan,
+    session: &mut AppContainer,
+) -> Result<Launched, EngineError> {
+    let (stdout_r, stdout_w) = inheritable_pipe()?;
+    let (stderr_r, stderr_w) = inheritable_pipe()?;
+    let stdin = nul_handle()?;
+    unsafe {
+        SetHandleInformation(
+            HANDLE(stdout_r.as_raw()),
+            HANDLE_FLAG_INHERIT.0,
+            HANDLE_FLAGS(0),
+        )
+        .map_err(|e| unavailable(e.to_string()))?;
+        SetHandleInformation(
+            HANDLE(stderr_r.as_raw()),
+            HANDLE_FLAG_INHERIT.0,
+            HANDLE_FLAGS(0),
+        )
+        .map_err(|e| unavailable(e.to_string()))?;
     }
-    Ok(child)
+
+    let mut caps = SECURITY_CAPABILITIES {
+        AppContainerSid: session.sid,
+        Capabilities: session.capabilities.as_mut_ptr(),
+        CapabilityCount: session.capabilities.len() as u32,
+        Reserved: 0,
+    };
+
+    let mut attr_size = 0usize;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut attr_size) };
+    if attr_size == 0 {
+        return Err(unavailable("InitializeProcThreadAttributeList size failed"));
+    }
+    let mut attr_buf = vec![0u8; attr_size];
+    let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr().cast());
+    unsafe { InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size) }
+        .map_err(|e| unavailable(e.to_string()))?;
+    let update = unsafe {
+        UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+            Some((&raw const caps).cast()),
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+            None,
+            None,
+        )
+    };
+    if let Err(err) = update {
+        unsafe { DeleteProcThreadAttributeList(attr_list) };
+        return Err(unavailable(err.to_string()));
+    }
+
+    let mut si = STARTUPINFOEXW {
+        StartupInfo: STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+            dwFlags: windows::Win32::System::Threading::STARTF_USESTDHANDLES,
+            hStdInput: stdin,
+            hStdOutput: stdout_w,
+            hStdError: stderr_w,
+            ..Default::default()
+        },
+        lpAttributeList: attr_list,
+    };
+
+    let exe = wide_path(&plan.java);
+    let mut cmdline = wide(&command_line(plan));
+    let cwd = wide_path(&plan.cwd);
+    let env = env_block(plan);
+    let mut pi = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            PCWSTR(exe.as_ptr()),
+            Some(PWSTR(cmdline.as_mut_ptr())),
+            None,
+            None,
+            true,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            Some(env.as_ptr().cast()),
+            PCWSTR(cwd.as_ptr()),
+            &si.StartupInfo,
+            &mut pi,
+        )
+    };
+    unsafe { DeleteProcThreadAttributeList(attr_list) };
+    let _ = unsafe { CloseHandle(stdout_w) };
+    let _ = unsafe { CloseHandle(stderr_w) };
+    let _ = unsafe { CloseHandle(stdin) };
+    created.map_err(|e| unavailable(format!("CreateProcessW AppContainer: {e}")))?;
+    let _ = unsafe { CloseHandle(pi.hThread) };
+
+    Ok(Launched {
+        pid: pi.dwProcessId,
+        process: pi.hProcess,
+        stdout: stdout_r,
+        stderr: stderr_r,
+    })
+}
+
+fn adopt_child(launched: Launched) -> Result<Child, EngineError> {
+    let mut marker = Command::new("cmd.exe")
+        .args(["/C", "exit", "0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .spawn()
+        .map_err(|e| EngineError::io(Path::new("cmd.exe"), e))?;
+    JAILS.lock().insert(
+        marker.id(),
+        Jail {
+            java_pid: launched.pid,
+            process: launched.process,
+        },
+    );
+    marker.stdout = Some(ChildStdout::from(launched.stdout));
+    marker.stderr = Some(ChildStderr::from(launched.stderr));
+    Ok(marker)
 }
 
 struct AppContainer {
@@ -143,44 +277,6 @@ impl AppContainer {
         }
         for path in &plan.sandbox.allow_write {
             grant_acl(path, self.sid, GENERIC_ALL.0)?;
-        }
-        Ok(())
-    }
-
-    fn apply_to_child(&mut self, child: &std::process::Child) -> Result<(), EngineError> {
-        let process = HANDLE(child.as_raw_handle());
-        let thread = primary_thread(child.id())?;
-        let mut caps = SECURITY_CAPABILITIES {
-            AppContainerSid: self.sid,
-            Capabilities: self.capabilities.as_mut_ptr(),
-            CapabilityCount: self.capabilities.len() as u32,
-            Reserved: 0,
-        };
-        let create_token = create_appcontainer_token_fn()?;
-        let set_token = nt_set_information_process_fn()?;
-        let mut token = HANDLE::default();
-        let hr = unsafe { create_token(HANDLE::default(), &caps, &mut token) };
-        if hr.is_err() {
-            let _ = unsafe { CloseHandle(thread) };
-            return Err(unavailable(format!(
-                "CreateAppContainerToken failed: {hr:?}"
-            )));
-        }
-        let info = ProcessAccessToken { token, thread };
-        let status = unsafe {
-            set_token(
-                process,
-                PROCESS_ACCESS_TOKEN,
-                &info,
-                std::mem::size_of::<ProcessAccessToken>() as u32,
-            )
-        };
-        let _ = unsafe { CloseHandle(token) };
-        let _ = unsafe { CloseHandle(thread) };
-        if status < 0 {
-            return Err(unavailable(format!(
-                "NtSetInformationProcess failed: {status:#x}"
-            )));
         }
         Ok(())
     }
@@ -310,90 +406,94 @@ fn grant_acl(path: &Path, sid: PSID, access: u32) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn create_appcontainer_token_fn() -> Result<CreateAppContainerTokenFn, EngineError> {
-    unsafe {
-        let module =
-            GetModuleHandleW(w!("kernelbase.dll")).map_err(|e| unavailable(e.to_string()))?;
-        let proc = GetProcAddress(module, s!("CreateAppContainerToken"))
-            .ok_or_else(|| unavailable("CreateAppContainerToken not found"))?;
-        Ok(std::mem::transmute(proc))
-    }
+fn inheritable_pipe() -> Result<(OwnedHandle, HANDLE), EngineError> {
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    let mut read = HANDLE::default();
+    let mut write = HANDLE::default();
+    unsafe { CreatePipe(&mut read, &mut write, Some(&sa), 0) }
+        .map_err(|e| unavailable(e.to_string()))?;
+    let read = unsafe { OwnedHandle::from_raw_handle(read.0) };
+    Ok((read, write))
 }
 
-fn nt_set_information_process_fn() -> Result<NtSetInformationProcessFn, EngineError> {
+fn nul_handle() -> Result<HANDLE, EngineError> {
+    let path = wide("\\\\.\\NUL");
     unsafe {
-        let module = GetModuleHandleW(w!("ntdll.dll")).map_err(|e| unavailable(e.to_string()))?;
-        let proc = GetProcAddress(module, s!("NtSetInformationProcess"))
-            .ok_or_else(|| unavailable("NtSetInformationProcess not found"))?;
-        Ok(std::mem::transmute(proc))
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            GENERIC_READ.0 | GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
     }
+    .map_err(|e| unavailable(e.to_string()))
 }
 
-fn primary_thread(pid: u32) -> Result<HANDLE, EngineError> {
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-            .map_err(|e| unavailable(e.to_string()))?;
-        let mut entry = THREADENTRY32 {
-            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-            ..Default::default()
-        };
-        let result = (|| {
-            Thread32First(snap, &mut entry).map_err(|e| unavailable(e.to_string()))?;
-            loop {
-                if entry.th32OwnerProcessID == pid {
-                    return OpenThread(
-                        THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION | THREAD_SET_INFORMATION,
-                        false,
-                        entry.th32ThreadID,
-                    )
-                    .map_err(|e| unavailable(e.to_string()));
-                }
-                if Thread32Next(snap, &mut entry).is_err() {
-                    break;
-                }
-            }
-            Err(unavailable("AppContainer process has no thread"))
-        })();
-        let _ = CloseHandle(snap);
-        result
+fn command_line(plan: &LaunchPlan) -> String {
+    let mut out = String::new();
+    append_quoted(&mut out, plan.java.as_os_str());
+    for arg in &plan.jvm_args {
+        out.push(' ');
+        append_quoted(&mut out, OsStr::new(arg));
     }
+    out.push(' ');
+    append_quoted(&mut out, OsStr::new(&plan.main_class));
+    for arg in &plan.game_args {
+        out.push(' ');
+        append_quoted(&mut out, OsStr::new(arg));
+    }
+    out
 }
 
-fn resume_process(pid: u32) -> Result<(), EngineError> {
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-            .map_err(|e| unavailable(e.to_string()))?;
-        let mut entry = THREADENTRY32 {
-            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-            ..Default::default()
-        };
-        let result = (|| {
-            Thread32First(snap, &mut entry).map_err(|e| unavailable(e.to_string()))?;
-            let mut resumed = false;
-            loop {
-                if entry.th32OwnerProcessID == pid {
-                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
-                        .map_err(|e| unavailable(e.to_string()))?;
-                    let prev = ResumeThread(thread);
-                    let _ = CloseHandle(thread);
-                    if prev == u32::MAX {
-                        return Err(unavailable("ResumeThread failed"));
-                    }
-                    resumed = true;
-                }
-                if Thread32Next(snap, &mut entry).is_err() {
-                    break;
-                }
-            }
-            if resumed {
-                Ok(())
-            } else {
-                Err(unavailable("no thread to resume"))
-            }
-        })();
-        let _ = CloseHandle(snap);
-        result
+fn append_quoted(out: &mut String, arg: &OsStr) {
+    let s = arg.to_string_lossy();
+    if !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c == '"') {
+        out.push_str(&s);
+        return;
     }
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+}
+
+fn env_block(plan: &LaunchPlan) -> Vec<u16> {
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let tmp = plan.cwd.as_os_str();
+    for key in ["TMPDIR", "TEMP", "TMP"] {
+        if let Some(slot) = vars.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(key)) {
+            slot.1 = tmp.to_os_string();
+        } else {
+            vars.push((OsString::from(key), tmp.to_os_string()));
+        }
+    }
+    for (key, value) in &plan.env {
+        if let Some(slot) = vars.iter_mut().find(|(k, _)| k == key) {
+            slot.1 = OsString::from(value);
+        } else {
+            vars.push((OsString::from(key), OsString::from(value)));
+        }
+    }
+    let mut block = Vec::new();
+    for (k, v) in vars {
+        block.extend(k.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    block
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -410,8 +510,26 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .collect()
 }
 
+trait AsRawVoid {
+    fn as_raw(&self) -> RawHandle;
+}
+
+impl AsRawVoid for OwnedHandle {
+    fn as_raw(&self) -> RawHandle {
+        std::os::windows::io::AsRawHandle::as_raw_handle(self)
+    }
+}
+
 fn unavailable(reason: impl Into<String>) -> EngineError {
     EngineError::SandboxUnavailable {
         reason: reason.into(),
+    }
+}
+
+impl Drop for Jail {
+    fn drop(&mut self) {
+        if !self.process.is_invalid() {
+            let _ = unsafe { CloseHandle(self.process) };
+        }
     }
 }

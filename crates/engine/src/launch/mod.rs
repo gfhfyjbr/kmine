@@ -100,7 +100,7 @@ impl Engine {
                     return Err(err);
                 }
             };
-            let pid = child.id();
+            let pid = crate::sandbox::child_pid(&child);
             self.rt.spawn(async move {
                 watch_std_process(child, kill_rx, id, tokens, events, processes, db).await;
             });
@@ -689,11 +689,11 @@ async fn watch_std_process(
         pump_std_lines(err, LogStream::Stderr, id, events.clone(), tokens.clone());
     }
 
-    let pid = child.id();
+    let pid = crate::sandbox::child_pid(&child);
     if *kill_rx.borrow() {
         kill_pid(pid);
     }
-    let mut wait = tokio::task::spawn_blocking(move || child.wait());
+    let mut wait = tokio::task::spawn_blocking(move || crate::sandbox::wait_child(child));
     let status = loop {
         tokio::select! {
             res = &mut wait => break res.ok().and_then(Result::ok),

@@ -1,6 +1,6 @@
 //! bubblewrap jail from the `bwrap(1)` filesystem/namespace options.
 
-use super::apply_plan_stdio;
+use super::{apply_plan_stdio, linux_runtime_socket_paths};
 use crate::error::EngineError;
 use crate::types::LaunchPlan;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,9 @@ pub(super) fn spawn(plan: &LaunchPlan) -> Result<std::process::Child, EngineErro
         cmd.arg("--dev-bind").arg("/dev/snd").arg("/dev/snd");
     }
     if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        bind_try(&mut cmd, Path::new(&runtime));
+        for sock in linux_runtime_socket_paths(Path::new(&runtime)) {
+            bind_try(&mut cmd, &sock);
+        }
     }
     ro_bind_try(&mut cmd, Path::new("/tmp/.X11-unix"));
     if let Ok(xauth) = std::env::var("XAUTHORITY") {

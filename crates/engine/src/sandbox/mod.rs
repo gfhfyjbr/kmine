@@ -10,7 +10,9 @@ mod windows;
 use crate::error::EngineError;
 use crate::paths::LauncherPaths;
 use crate::types::{LaunchPlan, SandboxSpec, SandboxStatus};
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Child, ExitStatus};
 
 pub fn sandbox_status() -> SandboxStatus {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -71,6 +73,29 @@ pub fn fill_spec(plan: &LaunchPlan, paths: &LauncherPaths) -> SandboxSpec {
         allow_read,
         allow_write,
         network: true,
+    }
+}
+
+pub(crate) fn child_pid(child: &Child) -> u32 {
+    #[cfg(windows)]
+    {
+        windows::jailed_pid(child).unwrap_or_else(|| child.id())
+    }
+    #[cfg(not(windows))]
+    {
+        child.id()
+    }
+}
+
+pub(crate) fn wait_child(child: Child) -> io::Result<ExitStatus> {
+    #[cfg(windows)]
+    {
+        windows::wait_jailed(child)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut child = child;
+        child.wait()
     }
 }
 
@@ -161,6 +186,24 @@ fn ensure_write_dirs(plan: &LaunchPlan) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) fn linux_runtime_socket_paths(runtime: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(runtime) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with("wayland-") || name == "pulse" || name == "pipewire-0" {
+            out.push(entry.path());
+        }
+    }
+    out
+}
+
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|p| p == &path) {
         paths.push(path);
@@ -206,6 +249,42 @@ mod tests {
             spec.allow_read
                 .iter()
                 .any(|p| p.starts_with("/data/kmine/cache/libraries"))
+        );
+    }
+
+    #[test]
+    fn linux_runtime_binds_skip_session_bus_and_keyring() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("wayland-0"), b"").unwrap();
+        std::fs::write(dir.path().join("bus"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("keyring")).unwrap();
+        std::fs::write(dir.path().join("pipewire-0"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("pulse")).unwrap();
+        let binds = super::linux_runtime_socket_paths(dir.path());
+        assert!(binds.iter().any(|p| p.ends_with("wayland-0")));
+        assert!(binds.iter().any(|p| p.ends_with("pipewire-0")));
+        assert!(binds.iter().any(|p| p.ends_with("pulse")));
+        assert!(!binds.iter().any(|p| p.ends_with("bus")));
+        assert!(!binds.iter().any(|p| p.ends_with("keyring")));
+        assert!(!binds.iter().any(|p| p == dir.path()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn write_profile_allows_mapping_natives() {
+        let text = super::macos::profile_source(1, 1, true);
+        assert!(
+            text.contains("file-map-executable")
+                && text.contains("WRITE_0")
+                && text.contains("file-write*")
+        );
+        let write_line = text
+            .lines()
+            .find(|l| l.contains("WRITE_0"))
+            .expect("write rule");
+        assert!(
+            write_line.contains("file-map-executable"),
+            "write subpaths must be mappable for LWJGL natives: {write_line}"
         );
     }
 

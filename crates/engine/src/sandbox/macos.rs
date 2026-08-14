@@ -30,11 +30,7 @@ pub(super) fn spawn(plan: &LaunchPlan) -> Result<std::process::Child, EngineErro
     cmd.spawn().map_err(|e| EngineError::io(&plan.java, e))
 }
 
-fn seatbelt_profile(plan: &LaunchPlan) -> Result<(CString, Vec<CString>), EngineError> {
-    let java_home = java_home(&plan.java);
-    let reads: Vec<&Path> = plan.sandbox.allow_read.iter().map(Path::new).collect();
-    let writes: Vec<&Path> = plan.sandbox.allow_write.iter().map(Path::new).collect();
-
+pub(super) fn profile_source(read_n: usize, write_n: usize, network: bool) -> String {
     let mut text = String::from(
         "(version 1)\n\
          (deny default)\n\
@@ -58,20 +54,27 @@ fn seatbelt_profile(plan: &LaunchPlan) -> Result<(CString, Vec<CString>), Engine
          (allow process-exec* (literal (param \"JAVA\")) (subpath (param \"JAVA_HOME\")))\n\
          (allow file-map-executable (subpath (param \"JAVA_HOME\")))\n",
     );
-    for i in 0..reads.len() {
+    for i in 0..read_n {
         text.push_str(&format!(
             "(allow file-read* file-map-executable file-test-existence (subpath (param \"READ_{i}\")))\n"
         ));
     }
-    for i in 0..writes.len() {
+    for i in 0..write_n {
         text.push_str(&format!(
-            "(allow file-read* file-write* file-ioctl file-test-existence (subpath (param \"WRITE_{i}\")))\n"
+            "(allow file-read* file-write* file-ioctl file-map-executable file-test-existence (subpath (param \"WRITE_{i}\")))\n"
         ));
     }
-    if plan.sandbox.network {
+    if network {
         text.push_str("(system-network)\n(allow network*)\n");
     }
+    text
+}
 
+fn seatbelt_profile(plan: &LaunchPlan) -> Result<(CString, Vec<CString>), EngineError> {
+    let java_home = java_home(&plan.java);
+    let reads: Vec<&Path> = plan.sandbox.allow_read.iter().map(Path::new).collect();
+    let writes: Vec<&Path> = plan.sandbox.allow_write.iter().map(Path::new).collect();
+    let text = profile_source(reads.len(), writes.len(), plan.sandbox.network);
     let profile = cstring(&text)?;
     let mut params = Vec::new();
     push_param(&mut params, "JAVA", plan.java.as_path())?;
