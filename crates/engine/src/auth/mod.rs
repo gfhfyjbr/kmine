@@ -143,6 +143,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persist_msa_refresh_before_xbox_chain() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "access_token": "msa-access",
+                "refresh_token": "msa-refresh-new",
+                "scope": "XboxLive.signin XboxLive.offline_access"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xbox"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let kc = MemoryKeychain::new();
+        let (store, key) = Store::open(Path::new(":memory:"), &kc).unwrap();
+        let secrets = AccountSecrets {
+            msa_refresh: Some("stale-refresh".into()),
+            msa_access: None,
+            xbl: None,
+            xsts: None,
+            mc_access: None,
+        };
+        store
+            .put_secret(
+                &key,
+                &secret_id(account()),
+                &serde_json::to_vec(&secrets).unwrap(),
+            )
+            .unwrap();
+
+        let http = HttpFiles::new().unwrap();
+        let err = ensure_mc_token(
+            &http,
+            &store,
+            &key,
+            account(),
+            Utc::now(),
+            &endpoints_for(&server),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, EngineError::Http { status: 500, .. }));
+        let stored: AccountSecrets = serde_json::from_slice(
+            &store
+                .get_secret(&key, &secret_id(account()))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored.msa_refresh.as_deref(), Some("msa-refresh-new"));
+        assert_eq!(stored.msa_access.unwrap().token, "msa-access");
+    }
+
+    #[tokio::test]
     async fn ensure_mc_token_refreshes_from_msa_refresh() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -272,7 +332,9 @@ mod tests {
     async fn oauth_callback_returns_code_and_state() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let handle = tokio::task::spawn_blocking(move || super::oauth::wait_for_callback(listener));
+        let handle = tokio::task::spawn_blocking(move || {
+            super::oauth::wait_for_callback(listener, &tokio_util::sync::CancellationToken::new())
+        });
         let url = format!("http://{addr}/auth?code=the-code&state=the-state");
         let resp = reqwest::Client::new().get(url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
@@ -285,6 +347,36 @@ mod tests {
         let got = handle.await.unwrap().unwrap();
         assert_eq!(got.code, "the-code");
         assert_eq!(got.state, "the-state");
+    }
+
+    #[tokio::test]
+    async fn oauth_accept_timeout_is_auth_failed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let handle = tokio::task::spawn_blocking(move || {
+            super::oauth::wait_for_callback_deadline(
+                listener,
+                &tokio_util::sync::CancellationToken::new(),
+                std::time::Instant::now() + std::time::Duration::from_millis(50),
+            )
+        });
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            EngineError::AuthFailed { message } if message.contains("timed out")
+        ));
+    }
+
+    #[tokio::test]
+    async fn oauth_accept_cancel_is_cancelled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_wait = cancel.clone();
+        let handle = tokio::task::spawn_blocking(move || {
+            super::oauth::wait_for_callback(listener, &cancel_wait)
+        });
+        cancel.cancel();
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(matches!(err, EngineError::Cancelled));
     }
 
     fn xbox_body(token: &str, uhs: &str) -> serde_json::Value {

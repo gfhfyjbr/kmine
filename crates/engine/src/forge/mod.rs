@@ -273,7 +273,7 @@ async fn fetch_installer_libraries(
             continue;
         };
         let path = art.path.as_deref().unwrap();
-        let dest = paths.cache_libraries.join(path);
+        let dest = crate::paths::safe_join(&paths.cache_libraries, path)?;
         let url = art.url.as_deref().unwrap_or("");
         if url.is_empty() {
             if !(dest.is_file() && file_nonempty(&dest)) {

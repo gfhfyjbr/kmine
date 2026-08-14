@@ -1,5 +1,5 @@
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{App, ClickEvent, IntoElement, ParentElement, Styled, Window, div};
 use gpui_component::{ActiveTheme, StyledExt, button::Button, h_flex, v_flex};
 use kmine_engine::{Event, InstanceId, ProgressSink};
 
@@ -42,37 +42,33 @@ pub fn render(
     } else {
         format!("{} — {} / {}", modal.title, modal.done, modal.total)
     };
-    div()
-        .id("progress-overlay")
-        .absolute()
-        .size_full()
-        .flex()
+    h_flex()
+        .id("progress-status")
+        .w_full()
+        .px_4()
+        .py_2()
+        .gap_3()
         .items_center()
-        .justify_center()
-        .bg(cx.theme().overlay.opacity(0.5))
+        .justify_between()
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
         .child(
             v_flex()
-                .w(px(420.))
-                .gap_4()
-                .p_5()
-                .rounded(cx.theme().radius_lg)
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_lg()
+                .min_w_0()
+                .gap_1()
                 .child(div().font_semibold().child("Preparing"))
                 .child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(counts),
-                )
-                .child(
-                    h_flex().justify_end().child(
-                        Button::new("progress-cancel")
-                            .label("Cancel")
-                            .on_click(on_cancel),
-                    ),
                 ),
+        )
+        .child(
+            Button::new("progress-cancel")
+                .label("Cancel")
+                .on_click(on_cancel),
         )
 }

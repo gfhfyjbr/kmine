@@ -59,6 +59,7 @@ pub fn fill_spec(plan: &LaunchPlan, paths: &LauncherPaths) -> SandboxSpec {
         push_unique(&mut allow_read, parent.to_path_buf());
     }
     push_unique(&mut allow_read, paths.cache_libraries.clone());
+    push_unique(&mut allow_read, paths.cache_meta.clone());
     push_unique(&mut allow_read, paths.cache_assets_objects.clone());
     push_unique(&mut allow_read, paths.cache_assets_indexes.clone());
     push_unique(&mut allow_read, paths.cache_assets_virtual.clone());
@@ -250,6 +251,7 @@ mod tests {
                 .iter()
                 .any(|p| p.starts_with("/data/kmine/cache/libraries"))
         );
+        assert!(spec.allow_read.contains(&paths.cache_meta));
     }
 
     #[test]

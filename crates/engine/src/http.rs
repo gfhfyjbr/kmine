@@ -3,7 +3,11 @@ use serde::de::DeserializeOwned;
 use sha1::{Digest, Sha1};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct HttpFiles {
     pub client: reqwest::Client,
@@ -13,6 +17,8 @@ impl HttpFiles {
     pub fn new() -> Result<Self, EngineError> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("kmine/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|err| {
                 EngineError::io(

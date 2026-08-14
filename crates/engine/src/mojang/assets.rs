@@ -65,19 +65,28 @@ pub async fn fetch_assets(
             return Err(EngineError::Cancelled);
         }
         let hash = object.hash.to_ascii_lowercase();
-        if hash.len() < 2 {
+        if hash.len() < 2 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(EngineError::io(
                 &index_path,
-                io::Error::new(io::ErrorKind::InvalidData, "asset hash too short"),
+                io::Error::new(io::ErrorKind::InvalidData, "invalid asset hash"),
             ));
         }
-        let dest = paths.cache_assets_objects.join(&hash[..2]).join(&hash);
+        let dest = crate::paths::safe_join(
+            &paths.cache_assets_objects,
+            &format!("{}/{}", &hash[..2], hash),
+        )?;
         let url = object_url(index_url, &hash);
         http.download_sha1(&url, &dest, Some(&hash), cancel).await?;
         if index.map_to_resources {
-            materialize(&dest, &game_dir.join("resources").join(name))?;
+            materialize(
+                &dest,
+                &crate::paths::safe_join(&game_dir.join("resources"), name)?,
+            )?;
         } else if index.r#virtual {
-            materialize(&dest, &paths.cache_assets_virtual.join(name))?;
+            materialize(
+                &dest,
+                &crate::paths::safe_join(&paths.cache_assets_virtual, name)?,
+            )?;
         }
         done += 1;
         progress.set("Assets", done, total);
@@ -202,7 +211,8 @@ mod tests {
         .await
         .unwrap();
 
-        let dest = paths.cache_assets_objects.join("ab").join(hash);
+        let dest =
+            crate::paths::safe_join(&paths.cache_assets_objects, &format!("ab/{hash}")).unwrap();
         assert!(dest.is_file(), "missing {dest:?}");
         assert_eq!(std::fs::read(&dest).unwrap(), object);
         let rendered = dest.to_string_lossy();
@@ -210,5 +220,14 @@ mod tests {
             rendered.contains("objects/ab/") || rendered.contains("objects\\ab\\"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn asset_relative_names_cannot_escape_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::paths::LauncherPaths::new(root.path().to_path_buf());
+        assert!(crate::paths::safe_join(&paths.cache_assets_virtual, "minecraft/foo.png").is_ok());
+        assert!(crate::paths::safe_join(&paths.cache_assets_virtual, "../escape").is_err());
+        assert!(crate::paths::safe_join(&paths.cache_assets_objects, "../../etc/passwd").is_err());
     }
 }

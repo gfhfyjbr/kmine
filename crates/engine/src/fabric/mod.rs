@@ -1,6 +1,6 @@
 use crate::error::EngineError;
 use crate::ids::Loader;
-use crate::mojang::{Artifact, Library, LibraryDownloads, VersionInfo};
+use crate::mojang::{Artifact, Library, LibraryDownloads, VersionArguments, VersionInfo};
 use serde::Deserialize;
 
 pub const LOADER_INDEX_URL: &str = "https://meta.fabricmc.net/v2/versions/loader";
@@ -27,6 +27,8 @@ pub struct FabricProfile {
     pub main_class: String,
     #[serde(default)]
     pub libraries: Vec<FabricLibrary>,
+    #[serde(default)]
+    pub arguments: Option<VersionArguments>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,6 +64,15 @@ pub fn merge_fabric(mut vanilla: VersionInfo, profile: FabricProfile) -> Version
     vanilla.main_class = profile.main_class;
     for lib in profile.libraries {
         vanilla.libraries.push(library_from_fabric(lib));
+    }
+    if let Some(fabric_args) = profile.arguments {
+        match vanilla.arguments.as_mut() {
+            Some(existing) => {
+                existing.game.extend(fabric_args.game);
+                existing.jvm.extend(fabric_args.jvm);
+            }
+            None => vanilla.arguments = Some(fabric_args),
+        }
     }
     vanilla
 }
@@ -186,5 +197,23 @@ mod tests {
                 && a.url
                     == "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.16.0/fabric-loader-0.16.0.jar"
         }));
+    }
+
+    #[test]
+    fn merge_appends_fabric_jvm_and_game_args() {
+        let v = merge_fabric(load_version("version_1_21.json"), load_profile());
+        let args = v.arguments.as_ref().unwrap();
+        assert!(args.jvm.iter().any(|a| matches!(
+            a,
+            crate::mojang::LaunchArgument::Value(s) if s.contains("FabricMcEmu")
+        )));
+        assert!(args.game.iter().any(|a| matches!(
+            a,
+            crate::mojang::LaunchArgument::Value(s) if s == "--fabricGame"
+        )));
+        assert!(args.jvm.iter().any(|a| matches!(
+            a,
+            crate::mojang::LaunchArgument::Value(s) if s.contains("java.library.path")
+        )));
     }
 }

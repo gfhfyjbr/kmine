@@ -79,7 +79,10 @@ pub async fn ensure_mc_token(
 ) -> Result<String, EngineError> {
     let sid = secret_id(account);
     let secrets = load_secrets(store, key, &sid)?;
-    let (token, persist) = ensure_mc_token_owned(http, secrets, now, endpoints).await?;
+    let (token, persist) = ensure_mc_token_owned(http, secrets, now, endpoints, |s| {
+        save_secrets(store, key, &sid, s)
+    })
+    .await?;
     match persist {
         TokenPersist::Unchanged => Ok(token),
         TokenPersist::Save(secrets) => {
@@ -98,6 +101,7 @@ pub async fn ensure_mc_token_owned(
     mut secrets: AccountSecrets,
     now: DateTime<Utc>,
     endpoints: &AuthEndpoints,
+    persist: impl Fn(&AccountSecrets) -> Result<(), EngineError>,
 ) -> Result<(String, TokenPersist), EngineError> {
     if let Some(mc) = secrets.mc_access.as_ref() {
         if still_valid(mc.expiry, now) {
@@ -146,6 +150,7 @@ pub async fn ensure_mc_token_owned(
         Ok((new_refresh, access)) => {
             secrets.msa_refresh = Some(new_refresh);
             secrets.msa_access = Some(access);
+            persist(&secrets)?;
         }
         Err(EngineError::AuthExpired) => {
             return Ok((String::new(), TokenPersist::Delete));

@@ -47,6 +47,7 @@ pub struct Engine {
     pub(crate) preparing: parking_lot::Mutex<HashSet<InstanceId>>,
     pub(crate) redact_tokens: parking_lot::Mutex<HashMap<InstanceId, Vec<String>>>,
     pub(crate) login_lock: tokio::sync::Mutex<bool>,
+    pub(crate) login_cancel: parking_lot::Mutex<Option<CancellationToken>>,
     pub(crate) rt: tokio::runtime::Handle,
 }
 
@@ -114,6 +115,7 @@ impl Engine {
             preparing: parking_lot::Mutex::new(HashSet::new()),
             redact_tokens: parking_lot::Mutex::new(HashMap::new()),
             login_lock: tokio::sync::Mutex::new(false),
+            login_cancel: parking_lot::Mutex::new(None),
             rt: tokio::runtime::Handle::current(),
         })
     }
@@ -266,12 +268,15 @@ impl Engine {
                 std::io::Error::other(e.to_string()),
             )
         })?;
-        let callback =
-            tokio::task::spawn_blocking(move || crate::auth::oauth::wait_for_callback(listener))
-                .await
-                .map_err(|e| {
-                    EngineError::io(crate::auth::BIND, std::io::Error::other(e.to_string()))
-                })??;
+        let cancel = CancellationToken::new();
+        *self.login_cancel.lock() = Some(cancel.clone());
+        let callback = tokio::task::spawn_blocking(move || {
+            crate::auth::oauth::wait_for_callback(listener, &cancel)
+        })
+        .await
+        .map_err(|e| EngineError::io(crate::auth::BIND, std::io::Error::other(e.to_string())));
+        self.login_cancel.lock().take();
+        let callback = callback??;
         if callback.state != request.state {
             return Err(EngineError::AuthFailed {
                 message: "oauth state mismatch".into(),
@@ -295,6 +300,12 @@ impl Engine {
         self.store.lock().set_selected_account(Some(id))?;
         self.emit(Event::AccountsChanged);
         Ok(())
+    }
+
+    pub fn cancel_login(&self) {
+        if let Some(cancel) = self.login_cancel.lock().take() {
+            cancel.cancel();
+        }
     }
 
     pub async fn delete_account(&self, id: AccountId) -> Result<(), EngineError> {

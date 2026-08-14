@@ -9,7 +9,9 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Root,
     button::{Button, ButtonVariants},
-    h_flex, v_flex,
+    h_flex,
+    input::InputState,
+    v_flex,
 };
 use kmine_engine::{
     AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
@@ -41,6 +43,8 @@ pub struct KmineApp {
     accounts: AccountsModal,
     progress: Option<ProgressModal>,
     cancel: Option<CancellationToken>,
+    rename: Option<instances::RenameForm>,
+    delete_target: Option<(InstanceId, String)>,
     instance_pane: InstancePane,
     content_mods: Vec<ContentEntry>,
     content_resourcepacks: Vec<ContentEntry>,
@@ -65,6 +69,8 @@ impl KmineApp {
             accounts,
             progress: None,
             cancel: None,
+            rename: None,
+            delete_target: None,
             instance_pane: InstancePane::Play,
             content_mods: Vec::new(),
             content_resourcepacks: Vec::new(),
@@ -334,6 +340,7 @@ impl KmineApp {
 
     fn close_accounts(&mut self, cx: &mut Context<Self>) {
         self.show_accounts = false;
+        self.engine.cancel_login();
         cx.notify();
     }
 
@@ -375,6 +382,109 @@ impl KmineApp {
         .detach();
     }
 
+    fn open_rename(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == id)
+            .map(|instance| instance.name.clone())
+            .unwrap_or_default();
+        self.rename = Some(instances::RenameForm {
+            id,
+            name: cx.new(|cx| InputState::new(window, cx).default_value(name)),
+        });
+        self.status.clear();
+        cx.notify();
+    }
+
+    fn close_rename(&mut self, cx: &mut Context<Self>) {
+        self.rename = None;
+        cx.notify();
+    }
+
+    fn submit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.rename.as_ref() else {
+            return;
+        };
+        let id = form.id;
+        let name = form.name.read(cx).value().to_string();
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        self.status = "Renaming…".into();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.rename_instance(id, name).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(())) => {
+                        this.rename = None;
+                        this.refresh_instances();
+                        this.status.clear();
+                    }
+                    Ok(Err(err)) => this.status = err.to_string(),
+                    Err(err) => this.status = err.to_string(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_delete(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+        let name = self
+            .instances
+            .iter()
+            .find(|instance| instance.id == id)
+            .map(|instance| instance.name.clone())
+            .unwrap_or_default();
+        self.delete_target = Some((id, name));
+        self.status.clear();
+        cx.notify();
+    }
+
+    fn close_delete(&mut self, cx: &mut Context<Self>) {
+        self.delete_target = None;
+        cx.notify();
+    }
+
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.delete_target else {
+            return;
+        };
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        self.status = "Deleting…".into();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.delete_instance(id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(())) => {
+                        this.delete_target = None;
+                        if this.selected == Some(id) {
+                            this.selected = None;
+                            this.settings = None;
+                        }
+                        this.refresh_instances();
+                        this.reload_content();
+                        this.reload_quick_play();
+                        this.status.clear();
+                    }
+                    Ok(Err(err)) => this.status = err.to_string(),
+                    Err(err) => this.status = err.to_string(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn start_login(&mut self, cx: &mut Context<Self>) {
         if self.accounts.busy {
             return;
@@ -396,6 +506,9 @@ impl KmineApp {
                     }
                     Ok(Err(EngineError::AuthNotConfigured)) => {
                         this.accounts.error = Some(accounts::AUTH_NOT_CONFIGURED_HINT.into());
+                    }
+                    Ok(Err(EngineError::Cancelled)) => {
+                        this.accounts.error = None;
                     }
                     Ok(Err(err)) => this.accounts.error = Some(err.to_string()),
                     Err(err) => this.accounts.error = Some(err.to_string()),
@@ -566,13 +679,6 @@ impl KmineApp {
 
 impl Render for KmineApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.selected.is_some() {
-            match self.instance_pane {
-                InstancePane::Play => self.reload_quick_play(),
-                InstancePane::Content => self.reload_content(),
-                InstancePane::Settings => {}
-            }
-        }
         let this = cx.weak_entity();
         let selected = self.selected_instance().cloned();
         let identity = self.accounts.identity_label().to_string();
@@ -612,6 +718,21 @@ impl Render for KmineApp {
                                             .ok();
                                     }
                                 },
+                                {
+                                    let this = this.clone();
+                                    move |id, _, window, cx| {
+                                        this.update(cx, |this, cx| {
+                                            this.open_rename(id, window, cx);
+                                        })
+                                        .ok();
+                                    }
+                                },
+                                {
+                                    let this = this.clone();
+                                    move |id, _, _, cx| {
+                                        this.update(cx, |this, cx| this.open_delete(id, cx)).ok();
+                                    }
+                                },
                                 cx,
                             ))
                             .child(
@@ -620,6 +741,21 @@ impl Render for KmineApp {
                                     .h_full()
                                     .min_w_0()
                                     .bg(cx.theme().background)
+                                    .when_some(self.progress.as_ref(), |el, modal| {
+                                        el.child(progress::render(
+                                            modal,
+                                            {
+                                                let this = this.clone();
+                                                move |_, _, cx| {
+                                                    this.update(cx, |this, cx| {
+                                                        this.cancel_prepare(cx);
+                                                    })
+                                                    .ok();
+                                                }
+                                            },
+                                            cx,
+                                        ))
+                                    })
                                     .child(match selected {
                                         Some(instance) => right_pane(
                                             &instance,
@@ -672,6 +808,44 @@ impl Render for KmineApp {
                     ))
                 },
             )
+            .when_some(self.rename.as_ref(), |el, form| {
+                el.child(instances::rename_overlay(
+                    form,
+                    &self.status,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.submit_rename(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.close_rename(cx)).ok();
+                        }
+                    },
+                    cx,
+                ))
+            })
+            .when_some(self.delete_target.as_ref(), |el, (_, name)| {
+                el.child(instances::delete_overlay(
+                    name,
+                    &self.status,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.confirm_delete(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.close_delete(cx)).ok();
+                        }
+                    },
+                    cx,
+                ))
+            })
             .when(self.show_accounts, |el| {
                 el.child(accounts::render(
                     &self.accounts,
@@ -697,18 +871,6 @@ impl Render for KmineApp {
                         let this = this.clone();
                         move |_, _, cx| {
                             this.update(cx, |this, cx| this.close_accounts(cx)).ok();
-                        }
-                    },
-                    cx,
-                ))
-            })
-            .when_some(self.progress.as_ref(), |el, modal| {
-                el.child(progress::render(
-                    modal,
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.cancel_prepare(cx)).ok();
                         }
                     },
                     cx,

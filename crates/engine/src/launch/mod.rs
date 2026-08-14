@@ -181,8 +181,21 @@ impl Engine {
             let token_store = Store::open_file(&self.paths.db)?;
             load_account_secrets(&token_store, &self.master_key, &sid)?
         };
-        let (mc_token, persist) =
-            ensure_mc_token_owned(&http, secrets, Utc::now(), &AuthEndpoints::production()).await?;
+        let persist_db = self.paths.db.clone();
+        let persist_key = self.master_key;
+        let persist_sid = sid.clone();
+        let persist = move |secrets: &AccountSecrets| {
+            let token_store = Store::open_file(&persist_db)?;
+            save_account_secrets(&token_store, &persist_key, &persist_sid, secrets)
+        };
+        let (mc_token, persist) = ensure_mc_token_owned(
+            &http,
+            secrets,
+            Utc::now(),
+            &AuthEndpoints::production(),
+            persist,
+        )
+        .await?;
         {
             let token_store = Store::open_file(&self.paths.db)?;
             match persist {

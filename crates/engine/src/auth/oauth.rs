@@ -4,7 +4,11 @@ use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
+
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const ACCEPT_POLL: Duration = Duration::from_millis(100);
 
 pub struct AuthorizeRequest {
     pub url: String,
@@ -12,6 +16,7 @@ pub struct AuthorizeRequest {
     pub pkce_verifier: String,
 }
 
+#[derive(Debug)]
 pub struct AuthCallback {
     pub code: String,
     pub state: String,
@@ -36,11 +41,44 @@ pub fn authorize_request() -> Result<AuthorizeRequest, EngineError> {
     })
 }
 
-pub fn wait_for_callback(listener: TcpListener) -> Result<AuthCallback, EngineError> {
+pub fn wait_for_callback(
+    listener: TcpListener,
+    cancel: &CancellationToken,
+) -> Result<AuthCallback, EngineError> {
+    wait_for_callback_deadline(listener, cancel, Instant::now() + ACCEPT_TIMEOUT)
+}
+
+pub(crate) fn wait_for_callback_deadline(
+    listener: TcpListener,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<AuthCallback, EngineError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| EngineError::io(BIND, e))?;
     loop {
-        let (stream, _) = listener.accept().map_err(|e| EngineError::io(BIND, e))?;
-        if let Some(callback) = handle_connection(stream)? {
-            return Ok(callback);
+        if cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(EngineError::AuthFailed {
+                message: "oauth callback timed out".into(),
+            });
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_nonblocking(false);
+                if let Some(callback) = handle_connection(stream)? {
+                    return Ok(callback);
+                }
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                std::thread::sleep(ACCEPT_POLL);
+            }
+            Err(err) => return Err(EngineError::io(BIND, err)),
         }
     }
 }

@@ -1,5 +1,35 @@
 use crate::error::EngineError;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+
+pub fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, EngineError> {
+    if Path::new(rel).is_absolute() {
+        return Err(unsafe_path(base, rel));
+    }
+    let mut dest = base.to_path_buf();
+    let mut pushed = false;
+    for part in rel.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." || Path::new(part).is_absolute() || Path::new(part).has_root() {
+            return Err(unsafe_path(base, rel));
+        }
+        dest.push(part);
+        pushed = true;
+    }
+    if !pushed {
+        return Err(unsafe_path(base, rel));
+    }
+    Ok(dest)
+}
+
+fn unsafe_path(base: &Path, rel: &str) -> EngineError {
+    EngineError::io(
+        base.join(rel),
+        io::Error::new(io::ErrorKind::InvalidInput, "unsafe path"),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct LauncherPaths {
@@ -94,6 +124,18 @@ mod tests {
         assert!(paths.cache_assets_virtual.is_dir());
         assert!(paths.cache_runtime.is_dir());
         assert!(paths.cache_natives.is_dir());
+    }
+
+    #[test]
+    fn safe_join_rejects_escape() {
+        use std::path::Path;
+        let base = Path::new("/data/kmine/cache/libraries");
+        assert!(super::safe_join(base, "com/mojang/a.jar").is_ok());
+        assert!(super::safe_join(base, "../escape.jar").is_err());
+        assert!(super::safe_join(base, "/tmp/evil.jar").is_err());
+        assert!(super::safe_join(base, "com/../../etc/passwd").is_err());
+        assert!(super::safe_join(base, "").is_err());
+        assert!(super::safe_join(base, ".").is_err());
     }
 
     #[test]

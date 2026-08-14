@@ -65,7 +65,7 @@ pub async fn fetch_libraries(
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        let dest = paths.cache_libraries.join(&artifact.path);
+        let dest = crate::paths::safe_join(&paths.cache_libraries, &artifact.path)?;
         if artifact.url.is_empty() {
             if dest.is_file() {
                 progress.set("Libraries", (i as u64) + 1, total);
@@ -258,6 +258,33 @@ mod tests {
         extract_natives(&jar, &dest, &[]).unwrap();
         assert!(dest.join("a.so").is_file());
         assert!(!dest.join("META-INF").exists());
+    }
+
+    #[tokio::test]
+    async fn fetch_libraries_rejects_parent_path() {
+        use crate::http::HttpFiles;
+        use crate::paths::LauncherPaths;
+        use crate::types::ProgressSink;
+        use tokio_util::sync::CancellationToken;
+
+        struct Noop;
+        impl ProgressSink for Noop {
+            fn set(&self, _title: &str, _done: u64, _total: u64) {}
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let err = super::fetch_libraries(
+            &HttpFiles::new().unwrap(),
+            &paths,
+            &[artifact("../escape.jar")],
+            &Noop,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::error::EngineError::Io { .. }));
     }
 
     #[test]

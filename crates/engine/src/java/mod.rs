@@ -83,6 +83,9 @@ async fn resolve_java_from(
     let platform = platform_id(std::env::consts::OS, std::env::consts::ARCH);
 
     let all_path = paths.cache_meta.join("java-all.json");
+    if all_path.exists() {
+        let _ = std::fs::remove_file(&all_path);
+    }
     http.download_sha1(all_json_url, &all_path, None, cancel)
         .await?;
     let bytes = std::fs::read(&all_path).map_err(|e| EngineError::io(&all_path, e))?;
@@ -217,20 +220,7 @@ async fn install_entry(
 }
 
 fn dest_for(root: &Path, rel: &str) -> Result<PathBuf, EngineError> {
-    let mut dest = root.to_path_buf();
-    for part in rel.split(['/', '\\']) {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            return Err(EngineError::io(
-                root.join(rel),
-                io::Error::new(io::ErrorKind::InvalidInput, "unsafe runtime path"),
-            ));
-        }
-        dest.push(part);
-    }
-    Ok(dest)
+    crate::paths::safe_join(root, rel)
 }
 
 fn set_executable(path: &Path) -> Result<(), EngineError> {
@@ -464,6 +454,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
+        std::fs::write(paths.cache_meta.join("java-all.json"), b"{\"stale\":true}").unwrap();
         let java = resolve_java_from(
             &HttpFiles::new().unwrap(),
             &paths,
