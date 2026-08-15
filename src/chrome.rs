@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt, App, ClickEvent, Div, ElementId, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Styled, Window, div, px,
+    Animation, AnimationExt, AnyElement, App, ClickEvent, Div, ElementId, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName,
@@ -57,6 +57,10 @@ pub fn sheet(cx: &App) -> impl ParentElement + Styled + IntoElement {
         .shadow_lg()
         .overflow_hidden()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+pub fn sheet_wide(cx: &App) -> impl ParentElement + Styled + IntoElement {
+    sheet(cx).w(px(880.)).max_h(px(720.))
 }
 
 pub fn modal_header(
@@ -185,9 +189,7 @@ pub fn loader_icon(loader: Loader) -> IconName {
 pub fn loader_tint(loader: Loader, cx: &App) -> (gpui::Hsla, gpui::Hsla) {
     match loader {
         Loader::Vanilla => (cx.theme().muted, cx.theme().muted_foreground),
-        Loader::Fabric | Loader::Quilt => {
-            (gpui::rgb(0x243036).into(), gpui::rgb(0xb7c9cc).into())
-        }
+        Loader::Fabric | Loader::Quilt => (gpui::rgb(0x243036).into(), gpui::rgb(0xb7c9cc).into()),
         Loader::Forge | Loader::NeoForge => {
             (gpui::rgb(0x30261f).into(), gpui::rgb(0xd0b8a0).into())
         }
@@ -210,6 +212,20 @@ pub fn section_label(text: impl Into<String>, cx: &App) -> impl IntoElement {
         .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
+}
+
+pub fn section_header(
+    text: impl Into<String>,
+    action: Option<AnyElement>,
+    cx: &App,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(section_label(text, cx))
+        .when_some(action, |this, action| this.child(action))
 }
 
 pub fn chip(text: impl Into<String>, cx: &App) -> impl IntoElement {

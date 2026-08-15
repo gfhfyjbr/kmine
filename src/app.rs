@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
@@ -19,11 +20,14 @@ use gpui_component::{
 use crate::chrome::{chip, loader_label};
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
-    AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
-    InstanceId, InstancePatch, InstanceSummary, Loader, QuickPlay, QuickPlayLists, SandboxStatus,
+    AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
+    CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort, ContentClass, ContentEntry,
+    ContentFolder, Engine, EngineError, Event, InstanceId, InstancePatch, InstanceSummary, Loader,
+    QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
 use crate::modals::accounts::{self, AccountsModal};
+use crate::modals::catalog::{self, CatalogModal, CatalogTarget};
 use crate::modals::confirm;
 use crate::modals::create_instance::{self, CreateInstanceForm};
 use crate::modals::progress::{self, EventProgressSink, ProgressModal};
@@ -46,6 +50,9 @@ pub struct KmineApp {
     show_accounts: bool,
     status: String,
     create: Option<CreateInstanceForm>,
+    catalog: Option<CatalogModal>,
+    search_gen: u64,
+    detail_gen: u64,
     accounts: AccountsModal,
     progress: Option<ProgressModal>,
     cancel: Option<CancellationToken>,
@@ -76,6 +83,9 @@ impl KmineApp {
             show_accounts: false,
             status: String::new(),
             create: None,
+            catalog: None,
+            search_gen: 0,
+            detail_gen: 0,
             accounts,
             progress: None,
             cancel: None,
@@ -399,6 +409,10 @@ impl KmineApp {
     }
 
     fn open_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.progress.is_some() {
+            return;
+        }
+        self.close_catalog(cx);
         self.close_accounts(cx);
         let form = CreateInstanceForm::new(window, cx);
         cx.subscribe(&form.name, |this, _, event: &InputEvent, cx| {
@@ -442,7 +456,641 @@ impl KmineApp {
         cx.notify();
     }
 
+    fn open_modpack_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.progress.is_some() {
+            return;
+        }
+        self.show_create = false;
+        self.create = None;
+        self.open_catalog(
+            ContentClass::Modpacks,
+            CatalogTarget::NewInstance,
+            None,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    fn open_content_catalog(
+        &mut self,
+        class: ContentClass,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.progress.is_some() {
+            return;
+        }
+        let Some(instance) = self.selected_instance().cloned() else {
+            return;
+        };
+        self.open_catalog(
+            class,
+            CatalogTarget::Instance(instance.id),
+            Some(instance.minecraft_version),
+            Some(instance.loader),
+            window,
+            cx,
+        );
+    }
+
+    fn open_catalog(
+        &mut self,
+        class: ContentClass,
+        target: CatalogTarget,
+        game_version: Option<String>,
+        loader: Option<Loader>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.progress.is_some() {
+            return;
+        }
+        self.close_accounts(cx);
+        let pack_filter = matches!(target, CatalogTarget::NewInstance);
+        let modal = CatalogModal::new(class, target, game_version, loader, window, cx);
+        cx.subscribe(&modal.search, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.schedule_catalog_search(cx);
+            }
+        })
+        .detach();
+        if pack_filter {
+            cx.subscribe(&modal.version_filter, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_catalog_search(cx);
+                }
+            })
+            .detach();
+        }
+        self.catalog = Some(modal);
+        self.status.clear();
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        self.load_catalog_categories(cx);
+        cx.notify();
+    }
+
+    fn close_catalog(&mut self, cx: &mut Context<Self>) {
+        self.catalog = None;
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn catalog_query(&self, cx: &App, index: u32, page_size: u32) -> Option<CatalogQuery> {
+        let catalog = self.catalog.as_ref()?;
+        let typed = catalog.search.read(cx).value();
+        let trimmed = typed.trim();
+        let search = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        let game_version = match catalog.target {
+            CatalogTarget::Instance(_) => catalog.game_version.clone(),
+            CatalogTarget::NewInstance => {
+                let value = catalog.version_filter.read(cx).value();
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+        };
+        let loader = match catalog.target {
+            CatalogTarget::Instance(_) => catalog.loader,
+            CatalogTarget::NewInstance => None,
+        };
+        Some(CatalogQuery {
+            class: catalog.class,
+            provider: catalog.provider,
+            search,
+            category_ids: catalog.selected_categories.clone(),
+            game_version,
+            loader,
+            sort: catalog.sort,
+            index,
+            page_size,
+        })
+    }
+
+    fn load_catalog_categories(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let provider = catalog.provider;
+        let class = catalog.class;
+        let generation = self.search_gen;
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.catalog_categories(provider, class).await })
+                .await;
+            this.update(cx, |this, cx| {
+                let Some(catalog) = this.catalog.as_mut() else {
+                    return;
+                };
+                match result {
+                    Ok(Ok(categories)) => {
+                        catalog.categories = categories;
+                        catalog.no_key = false;
+                        catalog.error = None;
+                        if this.search_gen == generation {
+                            this.run_catalog_search(false, cx);
+                        } else {
+                            catalog.loading = false;
+                            cx.notify();
+                        }
+                    }
+                    Ok(Err(EngineError::Catalog(CatalogError::Unavailable))) => {
+                        catalog.no_key = true;
+                        catalog.loading = false;
+                        cx.notify();
+                    }
+                    Ok(Err(err)) => {
+                        catalog.error = Some(err.to_string());
+                        catalog.loading = false;
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        catalog.error = Some(err.to_string());
+                        catalog.loading = false;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn schedule_catalog_search(&mut self, cx: &mut Context<Self>) {
+        if self.catalog.as_ref().is_some_and(|catalog| catalog.no_key) {
+            return;
+        }
+        self.search_gen = self.search_gen.wrapping_add(1);
+        let generation = self.search_gen;
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let _ = rt
+                .spawn(async { tokio::time::sleep(Duration::from_millis(300)).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.search_gen != generation {
+                    return;
+                }
+                this.run_catalog_search(false, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn run_catalog_search(&mut self, append: bool, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        if catalog.no_key {
+            return;
+        }
+        let (index, page_size) = if append {
+            catalog
+                .page
+                .as_ref()
+                .map(|page| (page.index.saturating_add(page.page_size), page.page_size))
+                .unwrap_or((0, catalog::PAGE_SIZE))
+        } else {
+            (0, catalog::PAGE_SIZE)
+        };
+        let Some(query) = self.catalog_query(cx, index, page_size) else {
+            return;
+        };
+        if let Some(catalog) = self.catalog.as_mut() {
+            catalog.loading = true;
+            if !append {
+                catalog.error = None;
+            }
+        }
+        let generation = self.search_gen;
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.catalog_search(&query).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.search_gen != generation {
+                    return;
+                }
+                let Some(catalog) = this.catalog.as_mut() else {
+                    return;
+                };
+                catalog.loading = false;
+                match result {
+                    Ok(Ok(page)) => {
+                        catalog.error = None;
+                        if append {
+                            if let Some(existing) = catalog.page.as_mut() {
+                                existing.items.extend(page.items);
+                                existing.index = page.index;
+                                existing.page_size = page.page_size;
+                                existing.total = page.total;
+                            } else {
+                                catalog.page = Some(page);
+                            }
+                        } else {
+                            catalog.page = Some(page);
+                        }
+                        this.prefetch_catalog_images(cx);
+                    }
+                    Ok(Err(EngineError::Catalog(CatalogError::Unavailable))) => {
+                        catalog.no_key = true;
+                    }
+                    Ok(Err(err)) => catalog.error = Some(err.to_string()),
+                    Err(err) => catalog.error = Some(err.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn catalog_load_more(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.page.as_ref())
+        else {
+            return;
+        };
+        if !catalog::can_page_more(page.index, page.page_size, page.total) {
+            return;
+        }
+        self.run_catalog_search(true, cx);
+    }
+
+    fn toggle_catalog_category(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_mut() else {
+            return;
+        };
+        if catalog.no_key {
+            return;
+        }
+        if let Some(index) = catalog
+            .selected_categories
+            .iter()
+            .position(|item| item == &id)
+        {
+            catalog.selected_categories.remove(index);
+        } else if catalog.selected_categories.len() < 10 {
+            catalog.selected_categories.push(id);
+        } else {
+            return;
+        }
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.run_catalog_search(false, cx);
+    }
+
+    fn set_catalog_sort(&mut self, sort: CatalogSort, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_mut() else {
+            return;
+        };
+        if catalog.no_key || catalog.sort == sort {
+            return;
+        }
+        catalog.sort = sort;
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.run_catalog_search(false, cx);
+    }
+
+    fn open_catalog_project(&mut self, id: CatalogProjectId, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_mut() else {
+            return;
+        };
+        if let Some(card) = catalog
+            .page
+            .as_ref()
+            .and_then(|page| page.items.iter().find(|project| project.id == id))
+            .cloned()
+        {
+            catalog.project = Some(stub_project(card));
+        }
+        catalog.files = None;
+        catalog.selected_file = None;
+        catalog.loading = true;
+        catalog.error = None;
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        let generation = self.detail_gen;
+        let provider = catalog.provider;
+        let filter = CatalogFileFilter {
+            game_version: match catalog.target {
+                CatalogTarget::Instance(_) => catalog.game_version.clone(),
+                CatalogTarget::NewInstance => {
+                    let value = catalog.version_filter.read(cx).value();
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+            },
+            loader: match catalog.target {
+                CatalogTarget::Instance(_) => catalog.loader,
+                CatalogTarget::NewInstance => None,
+            },
+            index: 0,
+            page_size: catalog::PAGE_SIZE,
+        };
+        let engine = self.engine.clone();
+        let project_engine = engine.clone();
+        let files_engine = engine;
+        let rt = self.rt.clone();
+        let project_id = id.clone();
+        let files_id = id;
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let fetched = rt
+                .spawn(async move {
+                    let project = project_engine.catalog_project(provider, &project_id).await;
+                    let files = files_engine
+                        .catalog_files(provider, &files_id, &filter)
+                        .await;
+                    (project, files)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.detail_gen != generation {
+                    return;
+                }
+                let Some(catalog) = this.catalog.as_mut() else {
+                    return;
+                };
+                catalog.loading = false;
+                match fetched {
+                    Ok((project, files)) => {
+                        match project {
+                            Ok(detail) => catalog.project = Some(detail),
+                            Err(EngineError::Catalog(CatalogError::Unavailable)) => {
+                                catalog.no_key = true;
+                            }
+                            Err(err) => catalog.error = Some(err.to_string()),
+                        }
+                        match files {
+                            Ok(page) => {
+                                if page.items.len() == 1 {
+                                    catalog.selected_file = Some(page.items[0].file_id.clone());
+                                }
+                                catalog.files = Some(page);
+                            }
+                            Err(err) => {
+                                if catalog.error.is_none() {
+                                    catalog.error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        this.prefetch_catalog_images(cx);
+                    }
+                    Err(err) => catalog.error = Some(err.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn catalog_back(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_mut() else {
+            return;
+        };
+        catalog.project = None;
+        catalog.files = None;
+        catalog.selected_file = None;
+        catalog.error = None;
+        catalog.loading = false;
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn select_catalog_file(&mut self, file_id: String, cx: &mut Context<Self>) {
+        if let Some(catalog) = self.catalog.as_mut() {
+            catalog.selected_file = Some(file_id);
+            cx.notify();
+        }
+    }
+
+    fn catalog_load_more_files(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let Some(project) = catalog.project.as_ref() else {
+            return;
+        };
+        let Some(page) = catalog.files.as_ref() else {
+            return;
+        };
+        if !catalog::can_page_more(page.index, page.page_size, page.total) {
+            return;
+        }
+        let provider = catalog.provider;
+        let project_id = project.project.id.clone();
+        let filter = CatalogFileFilter {
+            game_version: match catalog.target {
+                CatalogTarget::Instance(_) => catalog.game_version.clone(),
+                CatalogTarget::NewInstance => {
+                    let value = catalog.version_filter.read(cx).value();
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+            },
+            loader: match catalog.target {
+                CatalogTarget::Instance(_) => catalog.loader,
+                CatalogTarget::NewInstance => None,
+            },
+            index: page.index.saturating_add(page.page_size),
+            page_size: page.page_size,
+        };
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        let generation = self.detail_gen;
+        if let Some(catalog) = self.catalog.as_mut() {
+            catalog.loading = true;
+        }
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.catalog_files(provider, &project_id, &filter).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.detail_gen != generation {
+                    return;
+                }
+                let Some(catalog) = this.catalog.as_mut() else {
+                    return;
+                };
+                catalog.loading = false;
+                match result {
+                    Ok(Ok(page)) => {
+                        if let Some(existing) = catalog.files.as_mut() {
+                            existing.items.extend(page.items);
+                            existing.index = page.index;
+                            existing.page_size = page.page_size;
+                            existing.total = page.total;
+                        } else {
+                            catalog.files = Some(page);
+                        }
+                    }
+                    Ok(Err(err)) => catalog.error = Some(err.to_string()),
+                    Err(err) => catalog.error = Some(err.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn prefetch_catalog_images(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let mut urls = Vec::new();
+        if let Some(page) = catalog.page.as_ref() {
+            urls.extend(page.items.iter().filter_map(|item| item.logo_url.clone()));
+        }
+        if let Some(detail) = catalog.project.as_ref() {
+            urls.extend(detail.screenshot_urls.iter().cloned());
+            if let Some(logo) = detail.project.logo_url.clone() {
+                urls.push(logo);
+            }
+        }
+        urls.retain(|url| !url.is_empty() && !catalog.images.contains_key(url));
+        urls.sort();
+        urls.dedup();
+        for url in urls {
+            self.cache_catalog_image(url, cx);
+        }
+    }
+
+    fn cache_catalog_image(&mut self, url: String, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        let key = url.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.cache_remote_image(&url).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if let (Some(catalog), Ok(Ok(path))) = (this.catalog.as_mut(), result) {
+                    catalog.images.insert(key, path);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_catalog_website(&mut self, url: String) {
+        let _ = open::that(url);
+    }
+
+    fn install_catalog(&mut self, cx: &mut Context<Self>) {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return;
+        };
+        let Some(detail) = catalog.project.as_ref() else {
+            return;
+        };
+        let Some(file_id) = catalog.selected_file.clone() else {
+            return;
+        };
+        let provider = catalog.provider;
+        let target = catalog.target;
+        let project_id = detail.project.id.clone();
+        let name = detail.project.name.clone();
+        self.catalog = None;
+        self.show_create = false;
+        self.create = None;
+        self.search_gen = self.search_gen.wrapping_add(1);
+        self.detail_gen = self.detail_gen.wrapping_add(1);
+        if self.progress.is_some() {
+            return;
+        }
+        let progress_id = match target {
+            CatalogTarget::Instance(id) => id,
+            CatalogTarget::NewInstance => InstanceId::new(),
+        };
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.progress = Some(ProgressModal {
+            id: progress_id,
+            name: name.clone(),
+            title: "Installing…".into(),
+            done: 0,
+            total: 0,
+        });
+        self.status.clear();
+        cx.notify();
+
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        let events = engine.event_sender();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move {
+                    let sink = EventProgressSink::new(events, progress_id);
+                    match target {
+                        CatalogTarget::NewInstance => engine
+                            .install_pack(provider, &project_id, &file_id, None, &sink, &cancel)
+                            .await
+                            .map(InstallOutcome::Pack),
+                        CatalogTarget::Instance(id) => engine
+                            .install_content(id, provider, &project_id, &file_id, &sink, &cancel)
+                            .await
+                            .map(|()| InstallOutcome::Content),
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.progress = None;
+                this.cancel = None;
+                match result {
+                    Ok(Ok(InstallOutcome::Pack(id))) => {
+                        this.selected = Some(id);
+                        this.refresh_instances();
+                        this.reload_content();
+                        this.reload_quick_play();
+                        this.status.clear();
+                    }
+                    Ok(Ok(InstallOutcome::Content)) => {
+                        this.status.clear();
+                        this.reload_content();
+                    }
+                    Ok(Err(EngineError::Cancelled)) => this.status.clear(),
+                    Ok(Err(err)) => this.status = err.to_string(),
+                    Err(err) => this.status = err.to_string(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn open_accounts(&mut self, cx: &mut Context<Self>) {
+        self.close_catalog(cx);
         self.show_create = false;
         self.create = None;
         self.refresh_accounts();
@@ -737,7 +1385,7 @@ impl KmineApp {
             let _ = self.engine.kill(id);
             return;
         }
-        if self.progress.as_ref().is_some_and(|p| p.id == id) {
+        if self.progress.is_some() {
             return;
         }
 
@@ -845,21 +1493,26 @@ impl Render for KmineApp {
         div()
             .size_full()
             .relative()
-            .when(self.show_create || self.show_accounts, |el| {
-                el.key_context("Modal").on_action({
-                    let this = this.clone();
-                    move |_: &Cancel, _, cx| {
-                        this.update(cx, |this, cx| {
-                            if this.show_create && this.status != "Creating…" {
-                                this.close_create(cx);
-                            } else if this.show_accounts && !this.accounts.busy {
-                                this.close_accounts(cx);
-                            }
-                        })
-                        .ok();
-                    }
-                })
-            })
+            .when(
+                self.show_create || self.show_accounts || self.catalog.is_some(),
+                |el| {
+                    el.key_context("Modal").on_action({
+                        let this = this.clone();
+                        move |_: &Cancel, _, cx| {
+                            this.update(cx, |this, cx| {
+                                if this.catalog.is_some() {
+                                    this.close_catalog(cx);
+                                } else if this.show_create && this.status != "Creating…" {
+                                    this.close_create(cx);
+                                } else if this.show_accounts && !this.accounts.busy {
+                                    this.close_accounts(cx);
+                                }
+                            })
+                            .ok();
+                        }
+                    })
+                },
+            )
             .when(!crate::sidebar_is_glass(), |this| {
                 this.bg(cx.theme().background)
             })
@@ -950,6 +1603,7 @@ impl Render for KmineApp {
                                         self.settings.as_ref(),
                                         &sandbox_status,
                                         self.progress.as_ref().is_some_and(|p| p.id == instance.id),
+                                        self.progress.is_none(),
                                         this.clone(),
                                         cx,
                                     )
@@ -1003,6 +1657,13 @@ impl Render for KmineApp {
                         },
                         {
                             let this = this.clone();
+                            move |_, window, cx| {
+                                this.update(cx, |this, cx| this.open_modpack_catalog(window, cx))
+                                    .ok();
+                            }
+                        },
+                        {
+                            let this = this.clone();
                             move |_, _, cx| {
                                 this.update(cx, |this, cx| this.create_back(cx)).ok();
                             }
@@ -1023,6 +1684,78 @@ impl Render for KmineApp {
                     ))
                 },
             )
+            .when_some(self.catalog.as_ref(), |el, modal| {
+                el.child(catalog::render(
+                    modal,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.close_catalog(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |id, _, _, cx| {
+                            this.update(cx, |this, cx| this.toggle_catalog_category(id, cx))
+                                .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |sort, _, _, cx| {
+                            this.update(cx, |this, cx| this.set_catalog_sort(sort, cx))
+                                .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.catalog_load_more(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |id, _, _, cx| {
+                            this.update(cx, |this, cx| this.open_catalog_project(id, cx))
+                                .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.catalog_back(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |id, _, _, cx| {
+                            this.update(cx, |this, cx| this.select_catalog_file(id, cx))
+                                .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.catalog_load_more_files(cx))
+                                .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.install_catalog(cx)).ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |url, _, _, _cx| {
+                            this.update(_cx, |this, _| this.open_catalog_website(url))
+                                .ok();
+                        }
+                    },
+                    cx,
+                ))
+            })
             .when(self.show_accounts, |el| {
                 el.child(accounts::render(
                     &self.accounts,
@@ -1074,6 +1807,7 @@ fn right_pane(
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
     preparing: bool,
+    add_enabled: bool,
     this: WeakEntity<KmineApp>,
     cx: &App,
 ) -> impl IntoElement {
@@ -1133,6 +1867,8 @@ fn right_pane(
                         mods,
                         resourcepacks,
                         shaderpacks,
+                        instance.loader,
+                        add_enabled,
                         {
                             let this = this.clone();
                             move |path, enabled, _, cx| {
@@ -1147,6 +1883,15 @@ fn right_pane(
                             move |path, _, window, cx| {
                                 this.update(cx, |this, cx| {
                                     this.confirm_delete_content(path, window, cx);
+                                })
+                                .ok();
+                            }
+                        },
+                        {
+                            let this = this.clone();
+                            move |class, _, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.open_content_catalog(class, window, cx);
                                 })
                                 .ok();
                             }
@@ -1317,6 +2062,20 @@ fn pane_tab(
         })
         .on_click(on_click)
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+}
+
+enum InstallOutcome {
+    Pack(InstanceId),
+    Content,
+}
+
+fn stub_project(project: CatalogProject) -> CatalogProjectDetail {
+    CatalogProjectDetail {
+        project,
+        description_html: String::new(),
+        screenshot_urls: Vec::new(),
+        website_url: None,
+    }
 }
 
 fn empty_state(

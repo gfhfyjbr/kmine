@@ -3460,6 +3460,7 @@ dependencies = [
  "gpui_platform",
  "kmine-curseforge",
  "kmine-engine",
+ "open",
  "serde_json",
  "tokio",
 ]

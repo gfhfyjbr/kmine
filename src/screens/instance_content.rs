@@ -6,21 +6,24 @@ use gpui::{
     div, px,
 };
 use gpui_component::{
-    ActiveTheme,
+    ActiveTheme, Disableable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex, v_flex,
 };
-use kmine_engine::{ContentEntry, ContentFolder};
+use kmine_engine::{ContentClass, ContentEntry, ContentFolder, Loader};
 
-use crate::chrome::section_label;
+use crate::chrome::section_header;
 
 pub fn content_tab(
     mods: &[ContentEntry],
     resourcepacks: &[ContentEntry],
     shaderpacks: &[ContentEntry],
+    loader: Loader,
+    add_enabled: bool,
     on_toggle: impl Fn(PathBuf, bool, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_add: impl Fn(ContentClass, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     v_flex()
@@ -30,22 +33,31 @@ pub fn content_tab(
         .child(folder_section(
             ContentFolder::Mods,
             mods,
+            loader,
+            add_enabled,
             on_toggle.clone(),
             on_delete.clone(),
+            on_add.clone(),
             cx,
         ))
         .child(folder_section(
             ContentFolder::Resourcepacks,
             resourcepacks,
+            loader,
+            add_enabled,
             on_toggle.clone(),
             on_delete.clone(),
+            on_add.clone(),
             cx,
         ))
         .child(folder_section(
             ContentFolder::Shaderpacks,
             shaderpacks,
+            loader,
+            add_enabled,
             on_toggle,
             on_delete,
+            on_add,
             cx,
         ))
 }
@@ -53,27 +65,48 @@ pub fn content_tab(
 fn folder_section(
     folder: ContentFolder,
     entries: &[ContentEntry],
+    loader: Loader,
+    add_enabled: bool,
     on_toggle: impl Fn(PathBuf, bool, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_add: impl Fn(ContentClass, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let count = entries.len();
+    let show_add = !(loader == Loader::Vanilla && folder == ContentFolder::Mods);
+    let class = folder_class(folder);
+    let add_id = SharedString::from(format!("content-add-{}", folder_label(folder)));
     v_flex()
         .w_full()
         .gap_2()
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(section_label(folder_label(folder), cx))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(count.to_string()),
-                ),
-        )
+        .child(section_header(
+            folder_label(folder),
+            Some(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .when(show_add, |this| {
+                        this.child(
+                            Button::new(add_id)
+                                .ghost()
+                                .compact()
+                                .label("Add")
+                                .disabled(!add_enabled)
+                                .on_click(move |event, window, cx| {
+                                    on_add(class, event, window, cx);
+                                }),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(count.to_string()),
+                    )
+                    .into_any_element(),
+            ),
+            cx,
+        ))
         .when(entries.is_empty(), |this| {
             this.child(
                 div()
@@ -133,6 +166,14 @@ fn content_row(
                     on_delete(delete_path.clone(), event, window, cx);
                 }),
         )
+}
+
+fn folder_class(folder: ContentFolder) -> ContentClass {
+    match folder {
+        ContentFolder::Mods => ContentClass::Mods,
+        ContentFolder::Resourcepacks => ContentClass::ResourcePacks,
+        ContentFolder::Shaderpacks => ContentClass::Shaders,
+    }
 }
 
 fn folder_label(folder: ContentFolder) -> &'static str {

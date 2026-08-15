@@ -5,7 +5,7 @@ use gpui::{
     px,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, IconName,
+    ActiveTheme, Disableable, Icon, IconName,
     alert::Alert,
     button::{Button, ButtonVariants},
     h_flex,
@@ -74,6 +74,7 @@ pub fn render(
     form: &CreateInstanceForm,
     status: &str,
     on_kind: impl Fn(Loader, &mut Window, &mut App) + Clone + 'static,
+    on_modpack: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_back: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_submit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
@@ -82,16 +83,9 @@ pub fn render(
     let creating = status == "Creating…";
     let error = (!status.is_empty() && !creating).then(|| status.to_string());
     match form.phase {
-        CreatePhase::Kind => render_kind(on_kind, on_cancel, cx).into_any_element(),
+        CreatePhase::Kind => render_kind(on_kind, on_modpack, on_cancel, cx).into_any_element(),
         CreatePhase::Loader(loader) => render_loader(
-            form,
-            loader,
-            creating,
-            error,
-            on_back,
-            on_submit,
-            on_cancel,
-            cx,
+            form, loader, creating, error, on_back, on_submit, on_cancel, cx,
         )
         .into_any_element(),
     }
@@ -99,6 +93,7 @@ pub fn render(
 
 fn render_kind(
     on_kind: impl Fn(Loader, &mut Window, &mut App) + Clone + 'static,
+    on_modpack: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
@@ -120,7 +115,8 @@ fn render_kind(
                         .children(LOADERS.iter().copied().map(|loader| {
                             let on_kind = on_kind.clone();
                             kind_cell(loader, move |_, window, cx| on_kind(loader, window, cx), cx)
-                        })),
+                        }))
+                        .child(modpack_cell(on_modpack, cx)),
                 ),
             )
             .child(
@@ -148,12 +144,7 @@ fn render_loader(
     let subtitle = format!("Name it and pick a version for {}.", loader_label(loader));
     modal("create-instance-overlay", !creating, on_cancel.clone(), cx).child(
         sheet(cx)
-            .child(modal_header(
-                IconName::Plus,
-                "New instance",
-                subtitle,
-                cx,
-            ))
+            .child(modal_header(IconName::Plus, "New instance", subtitle, cx))
             .child(
                 modal_body()
                     .child(labeled_field("Name", Input::new(&form.name), cx))
@@ -241,5 +232,45 @@ fn kind_cell(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground)
                 .child(label),
+        )
+}
+
+fn modpack_cell(
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let radius = px(10.);
+    v_flex()
+        .id("kind-Modpack")
+        .w(px(124.))
+        .gap_2()
+        .p_2()
+        .items_center()
+        .rounded(radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().muted.opacity(0.35))
+        .cursor_pointer()
+        .hover(|this| this.bg(cx.theme().muted))
+        .on_click(on_click)
+        .child(
+            div()
+                .size(px(72.))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(cx.theme().border.opacity(0.55))
+                .bg(cx.theme().secondary_active)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(IconName::Folder).text_color(cx.theme().foreground)),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(cx.theme().foreground)
+                .child("Modpack"),
         )
 }
