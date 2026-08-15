@@ -3,10 +3,9 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Entity, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{
-    ActiveTheme, Disableable, IndexPath,
+    ActiveTheme, Disableable, IndexPath, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    form::{field, v_form},
     h_flex,
     input::{Input, InputState},
     select::{Select, SelectState},
@@ -16,6 +15,8 @@ use gpui_component::{
 use kmine_engine::{
     AccountId, AccountSummary, InstanceId, InstancePatch, InstanceRow, SandboxStatus,
 };
+
+use crate::chrome::section_label;
 
 pub const DEFAULT_ACCOUNT: &str = "Default account";
 const SANDBOX_WARNING: &str = "Native mods and RPC may break.";
@@ -71,10 +72,14 @@ impl SettingsForm {
                     .default_value(row.memory_max_mb.unwrap_or(0) as f32)
             }),
             jvm_flags: cx.new(|cx| {
-                InputState::new(window, cx).default_value(row.jvm_flags.clone().unwrap_or_default())
+                InputState::new(window, cx)
+                    .placeholder("Extra JVM flags")
+                    .default_value(row.jvm_flags.clone().unwrap_or_default())
             }),
             java_path: cx.new(|cx| {
-                InputState::new(window, cx).default_value(row.java_path.clone().unwrap_or_default())
+                InputState::new(window, cx)
+                    .placeholder("Mojang runtime")
+                    .default_value(row.java_path.clone().unwrap_or_default())
             }),
             sandbox: row.sandbox,
             account: cx
@@ -127,63 +132,86 @@ pub fn settings_tab(
     let max_label = ram_label(form.memory_max.read(cx).value().end());
     v_flex()
         .id("instance-settings")
-        .size_full()
-        .p_6()
-        .gap_4()
-        .overflow_y_scroll()
+        .w_full()
+        .gap_5()
         .child(
-            v_form()
-                .child(
-                    field()
-                        .label(format!("Min RAM ({min_label})"))
+            v_flex()
+                .w_full()
+                .gap_3()
+                .child(section_label("Memory", cx))
+                .child(field_block(
+                    format!("Minimum ({min_label})"),
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_2()
                         .child(Slider::new(&form.memory_min)),
-                )
-                .child(
-                    field()
-                        .label(format!("Max RAM ({max_label})"))
+                    cx,
+                ))
+                .child(field_block(
+                    format!("Maximum ({max_label})"),
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_2()
                         .child(Slider::new(&form.memory_max)),
-                )
-                .child(
-                    field()
-                        .label("JVM flags")
-                        .child(Input::new(&form.jvm_flags)),
-                )
-                .child(
-                    field()
-                        .label("Java path")
-                        .child(Input::new(&form.java_path)),
-                )
-                .child(field().label("Account").child(Select::new(&form.account))),
+                    cx,
+                )),
         )
         .child(
-            Checkbox::new("sandbox")
-                .label("Sandbox")
-                .checked(form.sandbox)
-                .disabled(!sandbox_available)
-                .on_click(move |checked, window, cx| {
-                    on_sandbox(*checked, window, cx);
-                }),
+            v_flex()
+                .w_full()
+                .gap_3()
+                .child(section_label("Launch", cx))
+                .child(field_block(
+                    "JVM flags",
+                    Input::new(&form.jvm_flags).small(),
+                    cx,
+                ))
+                .child(field_block(
+                    "Java path",
+                    Input::new(&form.java_path).small(),
+                    cx,
+                ))
+                .child(field_block("Account", Select::new(&form.account), cx)),
         )
         .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(SANDBOX_WARNING.to_string()),
-        )
-        .when(
-            matches!(sandbox_status, SandboxStatus::Unavailable { .. }),
-            |this| {
-                let reason = match sandbox_status {
-                    SandboxStatus::Unavailable { reason } => reason.clone(),
-                    SandboxStatus::Available => String::new(),
-                };
-                this.child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .p_4()
+                .rounded(cx.theme().radius_lg)
+                .bg(cx.theme().muted)
+                .child(
+                    Checkbox::new("sandbox")
+                        .label("Sandbox the game process")
+                        .checked(form.sandbox)
+                        .disabled(!sandbox_available)
+                        .on_click(move |checked, window, cx| {
+                            on_sandbox(*checked, window, cx);
+                        }),
+                )
+                .child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(reason),
+                        .child(SANDBOX_WARNING.to_string()),
                 )
-            },
+                .when(
+                    matches!(sandbox_status, SandboxStatus::Unavailable { .. }),
+                    |this| {
+                        let reason = match sandbox_status {
+                            SandboxStatus::Unavailable { reason } => reason.clone(),
+                            SandboxStatus::Available => String::new(),
+                        };
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(reason),
+                        )
+                    },
+                ),
         )
         .when(!status.is_empty(), |this| {
             this.child(
@@ -202,6 +230,19 @@ pub fn settings_tab(
                     .on_click(on_save),
             ),
         )
+}
+
+fn field_block(label: impl Into<String>, field: impl IntoElement, cx: &App) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(label.into()),
+        )
+        .child(field)
 }
 
 fn ram_from_slider(value: f32) -> Option<u32> {

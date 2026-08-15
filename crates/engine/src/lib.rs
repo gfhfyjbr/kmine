@@ -8,11 +8,13 @@ pub mod ids;
 pub mod instance;
 pub mod java;
 pub mod launch;
+pub mod logfmt;
 pub mod mojang;
 pub mod nbt;
 pub mod paths;
 pub mod redact;
 pub mod sandbox;
+pub mod skin;
 pub mod store;
 pub mod types;
 
@@ -251,7 +253,7 @@ impl Engine {
     }
 
     pub async fn start_login(&self) -> Result<AccountSummary, EngineError> {
-        if crate::auth::CLIENT_ID.is_empty() {
+        if crate::auth::client_id().is_empty() {
             return Err(EngineError::AuthNotConfigured);
         }
         let _guard = self
@@ -259,8 +261,9 @@ impl Engine {
             .try_lock()
             .map_err(|_| EngineError::LoginInProgress)?;
 
-        let listener = std::net::TcpListener::bind(crate::auth::BIND)
-            .map_err(|e| EngineError::io(crate::auth::BIND, e))?;
+        let bind = crate::auth::bind_addr();
+        let listener =
+            std::net::TcpListener::bind(&bind).map_err(|e| EngineError::io(bind.as_str(), e))?;
         let request = crate::auth::oauth::authorize_request()?;
         open::that(request.url.as_str()).map_err(|e| {
             EngineError::io(
@@ -274,7 +277,7 @@ impl Engine {
             crate::auth::oauth::wait_for_callback(listener, &cancel)
         })
         .await
-        .map_err(|e| EngineError::io(crate::auth::BIND, std::io::Error::other(e.to_string())));
+        .map_err(|e| EngineError::io(bind.as_str(), std::io::Error::other(e.to_string())));
         self.login_cancel.lock().take();
         let callback = callback??;
         if callback.state != request.state {

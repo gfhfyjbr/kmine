@@ -1,5 +1,5 @@
 use crate::error::EngineError;
-use crate::http::HttpFiles;
+use crate::http::{DownloadJob, HttpFiles};
 use crate::paths::LauncherPaths;
 use crate::types::ProgressSink;
 use serde::Deserialize;
@@ -31,6 +31,8 @@ struct AssetIndexFile {
 #[derive(Debug, Deserialize)]
 struct AssetObject {
     hash: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 pub async fn fetch_assets(
@@ -55,11 +57,8 @@ pub async fn fetch_assets(
     let index: AssetIndexFile = serde_json::from_slice(&bytes)
         .map_err(|e| EngineError::io(&index_path, io::Error::other(e.to_string())))?;
 
-    let total = index.objects.len() as u64;
-    let mut done = 0u64;
-    if total == 0 {
-        progress.set("Assets", 0, 0);
-    }
+    let mut jobs = Vec::with_capacity(index.objects.len());
+    let mut copies = Vec::new();
     for (name, object) in &index.objects {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -75,21 +74,27 @@ pub async fn fetch_assets(
             &paths.cache_assets_objects,
             &format!("{}/{}", &hash[..2], hash),
         )?;
-        let url = object_url(index_url, &hash);
-        http.download_sha1(&url, &dest, Some(&hash), cancel).await?;
+        jobs.push(DownloadJob {
+            url: object_url(index_url, &hash),
+            dest: dest.clone(),
+            sha1: Some(hash),
+            size: object.size.filter(|size| *size > 0),
+        });
         if index.map_to_resources {
-            materialize(
-                &dest,
-                &crate::paths::safe_join(&game_dir.join("resources"), name)?,
-            )?;
+            copies.push((
+                dest,
+                crate::paths::safe_join(&game_dir.join("resources"), name)?,
+            ));
         } else if index.r#virtual {
-            materialize(
-                &dest,
-                &crate::paths::safe_join(&paths.cache_assets_virtual, name)?,
-            )?;
+            copies.push((
+                dest,
+                crate::paths::safe_join(&paths.cache_assets_virtual, name)?,
+            ));
         }
-        done += 1;
-        progress.set("Assets", done, total);
+    }
+    http.download_many(jobs, "Assets", progress, cancel).await?;
+    for (src, dest) in copies {
+        materialize(&src, &dest)?;
     }
 
     if index.map_to_resources {

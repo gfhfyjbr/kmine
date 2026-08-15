@@ -3384,6 +3384,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "kmine-engine",
  "tokio",
@@ -3394,11 +3395,13 @@ name = "kmine-engine"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "base64",
  "chrono",
  "directories",
  "flate2",
  "hex",
  "httparse",
+ "image",
  "oauth2",
  "oo7",
  "open",

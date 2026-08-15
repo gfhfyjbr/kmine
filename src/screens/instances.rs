@@ -1,18 +1,20 @@
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Entity, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, px,
+    App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, img, px, rgba,
 };
 use gpui_component::{
-    ActiveTheme, StyledExt,
+    ActiveTheme, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
-    form::{field, v_form},
     h_flex,
     input::{Input, InputState},
-    list::ListItem,
     v_flex,
 };
 use kmine_engine::{InstanceId, InstanceSummary};
+use std::collections::HashSet;
+use std::path::Path;
+
+use crate::chrome::{loader_icon, loader_label, loader_tint};
 
 pub struct RenameForm {
     pub id: InstanceId,
@@ -22,22 +24,52 @@ pub struct RenameForm {
 pub fn sidebar(
     instances: &[InstanceSummary],
     selected: Option<InstanceId>,
+    identity: &str,
+    skin: Option<&Path>,
     on_select: impl Fn(InstanceId, &mut Window, &mut App) + Clone + 'static,
-    on_create: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_create: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_rename: impl Fn(InstanceId, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_confirm_rename: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(InstanceId, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_pin: impl Fn(InstanceId, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_accounts: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    renaming: Option<&RenameForm>,
+    pinned: &HashSet<InstanceId>,
     cx: &App,
 ) -> impl IntoElement {
+    let mut rows: Vec<&InstanceSummary> = instances.iter().collect();
+    rows.sort_by_key(|instance| !pinned.contains(&instance.id));
+    let glass = crate::sidebar_is_glass();
     v_flex()
         .id("instance-sidebar")
         .w(px(260.))
         .h_full()
         .flex_shrink_0()
-        .bg(cx.theme().sidebar)
+        .when(glass, |this| this.bg(rgba(0x121110d6)))
+        .when(!glass, |this| this.bg(cx.theme().sidebar))
         .text_color(cx.theme().sidebar_foreground)
-        .border_r_1()
-        .border_color(cx.theme().sidebar_border)
-        .child(h_flex().px_3().py_3().font_semibold().child("kmine"))
+        .child(
+            h_flex()
+                .h(if glass { px(52.) } else { px(40.) })
+                .pl(if glass { px(92.) } else { px(12.) })
+                .pr_3()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("kmine"),
+                )
+                .child(
+                    Button::new("sidebar-create")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Plus)
+                        .tooltip("New instance")
+                        .on_click(on_create.clone()),
+                ),
+        )
         .child(
             v_flex()
                 .id("instance-list")
@@ -45,14 +77,28 @@ pub fn sidebar(
                 .px_2()
                 .gap_1()
                 .overflow_y_scroll()
-                .children(instances.iter().map(|instance| {
+                .when(rows.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_6()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No instances yet"),
+                    )
+                })
+                .children(rows.into_iter().map(|instance| {
                     let id = instance.id;
                     let on_select = on_select.clone();
                     let on_rename = on_rename.clone();
+                    let on_confirm_rename = on_confirm_rename.clone();
                     let on_delete = on_delete.clone();
+                    let on_pin = on_pin.clone();
                     instance_row(
                         instance,
                         selected == Some(id),
+                        pinned.contains(&id),
+                        renaming.filter(|form| form.id == id),
                         move |_, window, cx| {
                             on_select(id, window, cx);
                         },
@@ -62,243 +108,303 @@ pub fn sidebar(
                         },
                         move |event, window, cx| {
                             cx.stop_propagation();
+                            on_confirm_rename(event, window, cx);
+                        },
+                        move |event, window, cx| {
+                            cx.stop_propagation();
                             on_delete(id, event, window, cx);
+                        },
+                        move |event, window, cx| {
+                            cx.stop_propagation();
+                            on_pin(id, event, window, cx);
                         },
                         cx,
                     )
                 })),
         )
         .child(
-            div().p_2().child(
-                Button::new("create-instance")
-                    .w_full()
-                    .label("+ Create")
-                    .on_click(on_create),
-            ),
+            v_flex()
+                .px_2()
+                .pb_2()
+                .pt_1()
+                .border_t_1()
+                .border_color(if glass {
+                    rgba(0xffffff1a).into()
+                } else {
+                    cx.theme().border
+                })
+                .child(identity_row(identity, skin, on_accounts, cx)),
         )
+}
+
+fn identity_row(
+    identity: &str,
+    skin: Option<&Path>,
+    on_accounts: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let signed_in = identity != "Not signed in";
+    let subtitle = if signed_in {
+        "Microsoft account"
+    } else {
+        "Add an account"
+    };
+    h_flex()
+        .id("accounts-identity")
+        .w_full()
+        .px_2()
+        .py_2()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .rounded(px(10.))
+        .cursor_pointer()
+        .hover(|this| {
+            this.bg(if crate::sidebar_is_glass() {
+                rgba(0xffffff18).into()
+            } else {
+                cx.theme().muted
+            })
+        })
+        .on_click(on_accounts)
+        .child(
+            h_flex()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .child(player_face(skin, cx))
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .id("accounts-nick")
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_ellipsis()
+                                .child(identity.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .text_ellipsis()
+                                .child(subtitle),
+                        ),
+                ),
+        )
+        .child(
+            Icon::new(IconName::Settings)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+        )
+}
+
+fn player_face(skin: Option<&Path>, cx: &App) -> impl IntoElement {
+    let radius = px(7.);
+    let face = div()
+        .size(px(28.))
+        .flex_shrink_0()
+        .rounded(radius)
+        .overflow_hidden()
+        .bg(cx.theme().muted)
+        .border_1()
+        .border_color(cx.theme().border);
+    match skin {
+        Some(path) => face.child(img(path.to_path_buf()).size_full().rounded(radius)),
+        None => face
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(Icon::new(IconName::User).text_color(cx.theme().muted_foreground)),
+    }
 }
 
 fn instance_row(
     instance: &InstanceSummary,
     selected: bool,
+    pinned: bool,
+    renaming: Option<&RenameForm>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_rename: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_confirm_rename: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_delete: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_pin: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
-) -> ListItem {
-    let rename_id = SharedString::from(format!("rename-{}", instance.id.as_hyphenated()));
-    let delete_id = SharedString::from(format!("delete-{}", instance.id.as_hyphenated()));
+) -> impl IntoElement {
+    let key = instance.id.as_hyphenated();
+    let row_id = SharedString::from(key.clone());
+    let group = SharedString::from(format!("instance-row-{key}"));
     let muted = cx.theme().muted_foreground;
-    ListItem::new(SharedString::from(instance.id.as_hyphenated()))
-        .selected(selected)
-        .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .py_1()
-                .child(div().font_semibold().child(instance.name.clone()))
-                .child(div().text_sm().text_color(muted).child(format!(
-                    "{} · {}",
-                    instance.minecraft_version,
-                    instance.loader.as_str()
-                )))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(last_played_label(instance.last_played_at)),
-                )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new(rename_id)
-                                .ghost()
-                                .compact()
-                                .label("Rename")
-                                .on_click(move |event, window, cx| {
-                                    cx.stop_propagation();
-                                    on_rename(event, window, cx);
-                                }),
-                        )
-                        .child(
-                            Button::new(delete_id)
-                                .ghost()
-                                .compact()
-                                .label("Delete")
-                                .on_click(move |event, window, cx| {
-                                    cx.stop_propagation();
-                                    on_delete(event, window, cx);
-                                }),
-                        ),
-                ),
-        )
+    let editing = renaming.is_some();
+    let name_color = if selected {
+        cx.theme().foreground
+    } else {
+        muted
+    };
+    h_flex()
+        .id(row_id)
+        .group(group.clone())
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .items_center()
+        .rounded(px(10.))
+        .when(selected && !editing, |this| {
+            this.bg(if crate::sidebar_is_glass() {
+                rgba(0xffffff22).into()
+            } else {
+                cx.theme().muted
+            })
+        })
+        .hover(|this| {
+            this.bg(if crate::sidebar_is_glass() {
+                rgba(0xffffff18).into()
+            } else {
+                cx.theme().muted
+            })
+        })
+        .cursor_pointer()
         .on_click(on_click)
+        .child(instance_mark(instance, cx))
+        .child(
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .when_some(renaming, |this, form| {
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id("inline-rename-input")
+                                    .min_w_0()
+                                    .flex_1()
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(Input::new(&form.name).small()),
+                            )
+                            .child(icon_btn(
+                                format!("rename-ok-{}", form.id.as_hyphenated()),
+                                IconName::Check,
+                                false,
+                                on_confirm_rename,
+                                cx,
+                            )),
+                    )
+                })
+                .when(!editing, |this| {
+                    this.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "instance-name-{}",
+                                instance.id.as_hyphenated()
+                            )))
+                            .text_sm()
+                            .font_weight(if selected {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_ellipsis()
+                            .text_color(name_color)
+                            .child(instance.name.clone()),
+                    )
+                    .child(div().text_xs().text_color(muted).child(format!(
+                        "{} · {}",
+                        instance.minecraft_version,
+                        loader_label(instance.loader)
+                    )))
+                }),
+        )
+        .when(instance.running && !editing, |this| {
+            this.child(
+                div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(cx.theme().success)
+                    .flex_shrink_0(),
+            )
+        })
+        .when(!editing, |this| {
+            this.child(
+                h_flex()
+                    .gap_1()
+                    .invisible()
+                    .group_hover(group, |style| style.visible())
+                    .child(icon_btn(
+                        format!("pin-{key}"),
+                        asset_icon(if pinned {
+                            "icons/pin-fill.svg"
+                        } else {
+                            "icons/pin.svg"
+                        }),
+                        pinned,
+                        on_pin,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        format!("rename-{key}"),
+                        IconName::ALargeSmall,
+                        false,
+                        on_rename,
+                        cx,
+                    ))
+                    .child(icon_btn(
+                        format!("delete-{key}"),
+                        asset_icon("icons/trash.svg"),
+                        false,
+                        on_delete,
+                        cx,
+                    )),
+            )
+        })
 }
 
-pub fn rename_overlay(
-    form: &RenameForm,
-    status: &str,
-    on_submit: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> impl IntoElement {
+fn instance_mark(instance: &InstanceSummary, cx: &App) -> impl IntoElement {
+    let (bg, fg) = loader_tint(instance.loader, cx);
     div()
-        .id("rename-instance-overlay")
-        .absolute()
-        .inset_0()
-        .occlude()
+        .size(px(28.))
+        .flex_shrink_0()
+        .rounded(px(7.))
+        .bg(bg)
         .flex()
         .items_center()
         .justify_center()
-        .bg(cx.theme().overlay.opacity(0.5))
         .child(
-            v_flex()
-                .w(px(420.))
-                .gap_4()
-                .p_5()
-                .rounded(cx.theme().radius_lg)
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_lg()
-                .child(div().font_semibold().child("Rename instance"))
-                .child(v_form().child(field().label("Name").child(Input::new(&form.name))))
-                .when(!status.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status.to_string()),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("rename-cancel")
-                                .label("Cancel")
-                                .on_click(on_cancel),
-                        )
-                        .child(
-                            Button::new("rename-submit")
-                                .primary()
-                                .label("Rename")
-                                .on_click(on_submit),
-                        ),
-                ),
+            Icon::new(loader_icon(instance.loader))
+                .text_sm()
+                .text_color(fg),
         )
 }
 
-pub fn delete_overlay(
-    name: &str,
-    status: &str,
-    on_confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+fn asset_icon(path: &'static str) -> Icon {
+    Icon::empty().path(path)
+}
+
+fn icon_btn(
+    id: impl Into<SharedString>,
+    icon: impl Into<Icon>,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
+    let color = if active {
+        cx.theme().foreground
+    } else {
+        cx.theme().muted_foreground
+    };
     div()
-        .id("delete-instance-overlay")
-        .absolute()
-        .inset_0()
-        .occlude()
+        .id(id.into())
+        .size(px(22.))
+        .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
-        .bg(cx.theme().overlay.opacity(0.5))
-        .child(
-            v_flex()
-                .w(px(420.))
-                .gap_4()
-                .p_5()
-                .rounded(cx.theme().radius_lg)
-                .bg(cx.theme().background)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_lg()
-                .child(div().font_semibold().child("Delete instance"))
-                .child(
-                    div()
-                        .text_sm()
-                        .child(format!("Delete “{name}”? This cannot be undone.")),
-                )
-                .when(!status.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status.to_string()),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("delete-cancel")
-                                .label("Cancel")
-                                .on_click(on_cancel),
-                        )
-                        .child(
-                            Button::new("delete-confirm")
-                                .primary()
-                                .label("Delete")
-                                .on_click(on_confirm),
-                        ),
-                ),
-        )
-}
-
-fn last_played_label(ts_ms: Option<i64>) -> String {
-    match civil_date_utc(ts_ms) {
-        Some((year, month, day)) => format!("Last played {year:04}-{month:02}-{day:02}"),
-        None => "Never played".into(),
-    }
-}
-
-fn civil_date_utc(ts_ms: Option<i64>) -> Option<(u32, u32, u32)> {
-    let ms = ts_ms?;
-    let secs = u64::try_from(ms.div_euclid(1000)).ok()?;
-    let mut rem = secs / 86400;
-    let mut year = 1970u32;
-    loop {
-        let len = if is_leap(year) { 366 } else { 365 };
-        if rem < len {
-            break;
-        }
-        rem -= len;
-        year = year.checked_add(1)?;
-        if year > 9999 {
-            return None;
-        }
-    }
-    let leap = is_leap(year);
-    let dims = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1u32;
-    for (i, dim) in dims.iter().enumerate() {
-        if rem < *dim {
-            month = (i as u32) + 1;
-            break;
-        }
-        rem -= *dim;
-    }
-    Some((year, month, rem as u32 + 1))
-}
-
-fn is_leap(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        .cursor_pointer()
+        .hover(|this| this.bg(cx.theme().secondary_hover))
+        .on_click(on_click)
+        .child(icon.into().text_sm().text_color(color))
 }

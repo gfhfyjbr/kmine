@@ -3,7 +3,7 @@ mod platform;
 pub use platform::platform_id;
 
 use crate::error::EngineError;
-use crate::http::HttpFiles;
+use crate::http::{DownloadJob, HttpFiles};
 use crate::mojang::VersionInfo;
 use crate::paths::LauncherPaths;
 use crate::types::ProgressSink;
@@ -113,18 +113,50 @@ async fn resolve_java_from(
     let dest_root = paths.cache_runtime.join(component).join(used_platform);
     std::fs::create_dir_all(&dest_root).map_err(|e| EngineError::io(&dest_root, e))?;
 
-    let total = manifest.files.len() as u64;
-    if total == 0 {
-        progress.set("Java", 0, 0);
-    }
-    let mut done = 0u64;
+    let mut jobs = Vec::new();
+    let mut executables = Vec::new();
+    let mut links = Vec::new();
     for (rel, file) in &manifest.files {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
-        install_entry(http, &dest_root, rel, file, cancel).await?;
-        done += 1;
-        progress.set("Java", done, total);
+        let dest = dest_for(&dest_root, rel)?;
+        match file {
+            RuntimeFile::Directory => {
+                std::fs::create_dir_all(&dest).map_err(|e| EngineError::io(&dest, e))?;
+            }
+            RuntimeFile::File {
+                downloads,
+                executable,
+            } => {
+                let raw = downloads.raw.as_ref().ok_or_else(|| {
+                    EngineError::io(
+                        &dest,
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "runtime file missing raw download",
+                        ),
+                    )
+                })?;
+                jobs.push(DownloadJob {
+                    url: raw.url.clone(),
+                    dest: dest.clone(),
+                    sha1: raw.sha1.clone(),
+                    size: raw.size.filter(|size| *size > 0),
+                });
+                if *executable {
+                    executables.push(dest);
+                }
+            }
+            RuntimeFile::Link { target } => links.push((dest, target.clone())),
+        }
+    }
+    http.download_many(jobs, "Java", progress, cancel).await?;
+    for dest in executables {
+        set_executable(&dest)?;
+    }
+    for (dest, target) in links {
+        create_link(&dest, &target)?;
     }
 
     locate_runtime_java(&dest_root).ok_or(EngineError::JavaNotFound)
@@ -181,42 +213,6 @@ fn locate_runtime_java(root: &Path) -> Option<PathBuf> {
         return Some(win);
     }
     None
-}
-
-async fn install_entry(
-    http: &HttpFiles,
-    root: &Path,
-    rel: &str,
-    entry: &RuntimeFile,
-    cancel: &CancellationToken,
-) -> Result<(), EngineError> {
-    let dest = dest_for(root, rel)?;
-    match entry {
-        RuntimeFile::Directory => {
-            std::fs::create_dir_all(&dest).map_err(|e| EngineError::io(&dest, e))?;
-        }
-        RuntimeFile::File {
-            downloads,
-            executable,
-        } => {
-            let raw = downloads.raw.as_ref().ok_or_else(|| {
-                EngineError::io(
-                    &dest,
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "runtime file missing raw download",
-                    ),
-                )
-            })?;
-            http.download_sha1(&raw.url, &dest, raw.sha1.as_deref(), cancel)
-                .await?;
-            if *executable {
-                set_executable(&dest)?;
-            }
-        }
-        RuntimeFile::Link { target } => create_link(&dest, target)?,
-    }
-    Ok(())
 }
 
 fn dest_for(root: &Path, rel: &str) -> Result<PathBuf, EngineError> {
@@ -281,6 +277,8 @@ struct RuntimeEntry {
 struct RemoteFile {
     sha1: Option<String>,
     url: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

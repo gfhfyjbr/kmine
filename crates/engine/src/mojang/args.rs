@@ -9,6 +9,11 @@ pub struct ArgContext {
     pub auth_access_token: String,
     pub user_type: String,
     pub version_name: String,
+    pub version_type: String,
+    pub client_id: String,
+    pub auth_xuid: String,
+    pub user_properties: String,
+    pub classpath_separator: String,
     pub game_directory: String,
     pub assets_root: String,
     pub assets_index_name: String,
@@ -74,6 +79,11 @@ fn lookup<'a>(ctx: &'a ArgContext, key: &str) -> Option<&'a str> {
         "auth_access_token" => Some(&ctx.auth_access_token),
         "user_type" => Some(&ctx.user_type),
         "version_name" => Some(&ctx.version_name),
+        "version_type" => Some(&ctx.version_type),
+        "clientid" => Some(&ctx.client_id),
+        "auth_xuid" => Some(&ctx.auth_xuid),
+        "user_properties" => Some(&ctx.user_properties),
+        "classpath_separator" => Some(&ctx.classpath_separator),
         "game_directory" => Some(&ctx.game_directory),
         "assets_root" => Some(&ctx.assets_root),
         "assets_index_name" => Some(&ctx.assets_index_name),
@@ -158,6 +168,11 @@ mod tests {
             auth_access_token: "token".into(),
             user_type: "msa".into(),
             version_name: "1.21.1".into(),
+            version_type: "release".into(),
+            client_id: "client".into(),
+            auth_xuid: String::new(),
+            user_properties: "{}".into(),
+            classpath_separator: ":".into(),
             game_directory: "/game".into(),
             assets_root: "/assets".into(),
             assets_index_name: "17".into(),
@@ -193,6 +208,19 @@ mod tests {
         assert!(
             game.windows(2)
                 .any(|w| w[0] == "--username" && w[1] == "Steve")
+        );
+    }
+
+    #[test]
+    fn interpolates_version_type() {
+        let v = load_fixture("version_1_21.json");
+        assert_eq!(v.version_type, "release");
+        let ctx = sample_ctx();
+        let (_, game) = build_args(&v, &ctx, &FeatureSet::default());
+        assert!(
+            game.windows(2)
+                .any(|w| w[0] == "--versionType" && w[1] == "release"),
+            "{game:?}"
         );
     }
 

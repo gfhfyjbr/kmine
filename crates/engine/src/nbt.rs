@@ -127,9 +127,14 @@ fn list_worlds(saves: &Path) -> Result<Vec<QuickPlayWorld>, EngineError> {
         }
         let bytes = std::fs::read(&level).map_err(|e| EngineError::io(&level, e))?;
         let label = read_level_name(&bytes).unwrap_or_else(|| folder.to_string());
+        let icon = {
+            let path = ent.path().join("icon.png");
+            path.is_file().then_some(path)
+        };
         worlds.push(QuickPlayWorld {
             folder: folder.to_string(),
             label,
+            icon,
         });
     }
     worlds.sort_by(|a, b| a.folder.cmp(&b.folder));
@@ -590,6 +595,7 @@ mod tests {
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&encode_level_name("Pretty Name")).unwrap();
         std::fs::write(named.join("level.dat"), enc.finish().unwrap()).unwrap();
+        std::fs::write(named.join("icon.png"), b"png").unwrap();
         let unlabeled = mc.join("saves").join("Raw");
         std::fs::create_dir_all(&unlabeled).unwrap();
         std::fs::write(unlabeled.join("level.dat"), b"not nbt").unwrap();
@@ -610,10 +616,12 @@ mod tests {
                 QuickPlayWorld {
                     folder: "Raw".into(),
                     label: "Raw".into(),
+                    icon: None,
                 },
                 QuickPlayWorld {
                     folder: "WorldA".into(),
                     label: "Pretty Name".into(),
+                    icon: Some(named.join("icon.png")),
                 },
             ]
         );

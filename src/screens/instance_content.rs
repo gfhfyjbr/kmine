@@ -3,15 +3,17 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, InteractiveElement, IntoElement, ParentElement, SharedString, Styled, Window,
-    div,
+    div, px,
 };
 use gpui_component::{
-    ActiveTheme, StyledExt,
+    ActiveTheme,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex, v_flex,
 };
 use kmine_engine::{ContentEntry, ContentFolder};
+
+use crate::chrome::section_label;
 
 pub fn content_tab(
     mods: &[ContentEntry],
@@ -23,10 +25,8 @@ pub fn content_tab(
 ) -> impl IntoElement {
     v_flex()
         .id("instance-content")
-        .size_full()
-        .p_6()
+        .w_full()
         .gap_5()
-        .overflow_y_scroll()
         .child(folder_section(
             ContentFolder::Mods,
             mods,
@@ -57,21 +57,40 @@ fn folder_section(
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
+    let count = entries.len();
     v_flex()
+        .w_full()
         .gap_2()
-        .child(div().font_semibold().child(folder_label(folder)))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(section_label(folder_label(folder), cx))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(count.to_string()),
+                ),
+        )
         .when(entries.is_empty(), |this| {
             this.child(
                 div()
+                    .w_full()
+                    .px_3()
+                    .py_3()
+                    .rounded(px(10.))
+                    .bg(cx.theme().muted)
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No files"),
+                    .child(folder_empty(folder)),
             )
         })
         .children(
             entries
                 .iter()
-                .map(|entry| content_row(entry, on_toggle.clone(), on_delete.clone())),
+                .map(|entry| content_row(entry, on_toggle.clone(), on_delete.clone(), cx)),
         )
 }
 
@@ -79,6 +98,7 @@ fn content_row(
     entry: &ContentEntry,
     on_toggle: impl Fn(PathBuf, bool, &mut Window, &mut App) + 'static,
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
 ) -> impl IntoElement {
     let path = entry.path.clone();
     let delete_path = path.clone();
@@ -90,6 +110,11 @@ fn content_row(
         .items_center()
         .justify_between()
         .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(10.))
+        .bg(cx.theme().muted)
+        .hover(|this| this.bg(cx.theme().secondary_hover))
         .child(
             Checkbox::new(key)
                 .label(entry.name.clone())
@@ -115,5 +140,13 @@ fn folder_label(folder: ContentFolder) -> &'static str {
         ContentFolder::Mods => "Mods",
         ContentFolder::Resourcepacks => "Resource packs",
         ContentFolder::Shaderpacks => "Shader packs",
+    }
+}
+
+fn folder_empty(folder: ContentFolder) -> &'static str {
+    match folder {
+        ContentFolder::Mods => "No mods in this instance",
+        ContentFolder::Resourcepacks => "No resource packs",
+        ContentFolder::Shaderpacks => "No shader packs",
     }
 }

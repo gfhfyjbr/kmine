@@ -1,24 +1,29 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, IntoElement, ParentElement, Render, Styled, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, px, size,
+    App, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, px, size,
 };
 use gpui_component::{
     ActiveTheme, Root,
-    button::{Button, ButtonVariants},
+    dialog::Cancel,
     h_flex,
-    input::InputState,
+    input::{InputEvent, InputState},
     v_flex,
 };
+
+use crate::chrome::{chip, loader_label};
 use kmine_engine::{
     AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
-    InstanceId, InstancePatch, InstanceSummary, QuickPlay, QuickPlayLists, SandboxStatus,
+    InstanceId, InstancePatch, InstanceSummary, Loader, QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
 use crate::modals::accounts::{self, AccountsModal};
+use crate::modals::confirm;
 use crate::modals::create_instance::{self, CreateInstanceForm};
 use crate::modals::progress::{self, EventProgressSink, ProgressModal};
 use crate::screens::{instance_content, instance_play, instance_settings, instances};
@@ -44,20 +49,22 @@ pub struct KmineApp {
     progress: Option<ProgressModal>,
     cancel: Option<CancellationToken>,
     rename: Option<instances::RenameForm>,
-    delete_target: Option<(InstanceId, String)>,
     instance_pane: InstancePane,
     content_mods: Vec<ContentEntry>,
     content_resourcepacks: Vec<ContentEntry>,
     content_shaderpacks: Vec<ContentEntry>,
     quick_play: QuickPlayLists,
     settings: Option<instance_settings::SettingsForm>,
+    skin_face: Option<PathBuf>,
+    skin_for: Option<AccountId>,
+    pinned: HashSet<InstanceId>,
 }
 
 impl KmineApp {
     pub fn new(engine: Arc<Engine>, cx: &mut Context<Self>) -> Self {
         let accounts = AccountsModal::from_engine(&engine);
         let instances = engine.list_instances().unwrap_or_default();
-        let this = Self {
+        let mut this = Self {
             engine,
             rt: tokio::runtime::Handle::current(),
             instances,
@@ -70,15 +77,18 @@ impl KmineApp {
             progress: None,
             cancel: None,
             rename: None,
-            delete_target: None,
             instance_pane: InstancePane::Play,
             content_mods: Vec::new(),
             content_resourcepacks: Vec::new(),
             content_shaderpacks: Vec::new(),
             quick_play: QuickPlayLists::default(),
             settings: None,
+            skin_face: None,
+            skin_for: None,
+            pinned: HashSet::new(),
         };
         this.listen_engine_events(cx);
+        this.ensure_skin(cx);
         this
     }
 
@@ -88,6 +98,46 @@ impl KmineApp {
 
     fn refresh_accounts(&mut self) {
         self.accounts.refresh(&self.engine);
+    }
+
+    fn selected_account_id(&self) -> Option<AccountId> {
+        self.accounts
+            .accounts
+            .iter()
+            .find(|account| account.selected)
+            .map(|account| account.uuid)
+    }
+
+    fn ensure_skin(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected_account_id();
+        if selected != self.skin_for {
+            self.skin_for = selected;
+            self.skin_face = selected.and_then(|id| self.engine.cached_skin_face(id));
+        }
+        let Some(id) = selected else {
+            self.skin_face = None;
+            return;
+        };
+        if self.skin_face.is_some() {
+            return;
+        }
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let fetched = rt
+                .spawn(async move { engine.ensure_skin_face(id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.skin_for == Some(id) {
+                    if let Ok(Ok(path)) = fetched {
+                        this.skin_face = Some(path);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn selected_instance(&self) -> Option<&InstanceSummary> {
@@ -225,6 +275,31 @@ impl KmineApp {
         cx.notify();
     }
 
+    fn confirm_delete_content(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("this file")
+            .to_string();
+        let this = cx.weak_entity();
+        confirm::danger(
+            window,
+            cx,
+            "Delete file",
+            format!("\"{name}\" will be removed from this instance."),
+            "Delete",
+            move |_, cx| {
+                this.update(cx, |this, cx| this.delete_content(path.clone(), cx))
+                    .ok();
+            },
+        );
+    }
+
     fn delete_content(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(id) = self.selected else {
             return;
@@ -258,6 +333,7 @@ impl KmineApp {
                         if this
                             .update(cx, |this, cx| {
                                 this.handle_engine_event(event);
+                                this.ensure_skin(cx);
                                 cx.notify();
                             })
                             .is_err()
@@ -320,10 +396,32 @@ impl KmineApp {
     }
 
     fn open_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.create = Some(CreateInstanceForm::new(window, cx));
+        self.close_accounts(cx);
+        let form = CreateInstanceForm::new(window, cx);
+        cx.subscribe(&form.name, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.submit_create(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&form.version, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.submit_create(cx);
+            }
+        })
+        .detach();
+        form.name.update(cx, |state, cx| state.focus(window, cx));
+        self.create = Some(form);
         self.status.clear();
         self.show_create = true;
         cx.notify();
+    }
+
+    fn set_create_loader(&mut self, loader: Loader, cx: &mut Context<Self>) {
+        if let Some(form) = self.create.as_mut() {
+            form.loader = loader;
+            cx.notify();
+        }
     }
 
     fn close_create(&mut self, cx: &mut Context<Self>) {
@@ -333,6 +431,8 @@ impl KmineApp {
     }
 
     fn open_accounts(&mut self, cx: &mut Context<Self>) {
+        self.show_create = false;
+        self.create = None;
         self.refresh_accounts();
         self.show_accounts = true;
         cx.notify();
@@ -389,10 +489,14 @@ impl KmineApp {
             .find(|instance| instance.id == id)
             .map(|instance| instance.name.clone())
             .unwrap_or_default();
-        self.rename = Some(instances::RenameForm {
-            id,
-            name: cx.new(|cx| InputState::new(window, cx).default_value(name)),
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.submit_rename(cx);
+            }
+        })
+        .detach();
+        self.rename = Some(instances::RenameForm { id, name: input });
         self.status.clear();
         cx.notify();
     }
@@ -433,30 +537,38 @@ impl KmineApp {
         .detach();
     }
 
-    fn open_delete(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+    fn toggle_pin(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+        if !self.pinned.remove(&id) {
+            self.pinned.insert(id);
+        }
+        cx.notify();
+    }
+
+    fn open_delete(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
         let name = self
             .instances
             .iter()
             .find(|instance| instance.id == id)
             .map(|instance| instance.name.clone())
-            .unwrap_or_default();
-        self.delete_target = Some((id, name));
-        self.status.clear();
-        cx.notify();
+            .unwrap_or_else(|| "this instance".into());
+        let this = cx.weak_entity();
+        confirm::danger(
+            window,
+            cx,
+            "Delete instance",
+            format!("\"{name}\" and its world files will be removed from this machine."),
+            "Delete",
+            move |_, cx| {
+                this.update(cx, |this, cx| this.delete_instance(id, cx))
+                    .ok();
+            },
+        );
     }
 
-    fn close_delete(&mut self, cx: &mut Context<Self>) {
-        self.delete_target = None;
-        cx.notify();
-    }
-
-    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
-        let Some((id, _)) = self.delete_target else {
-            return;
-        };
+    fn delete_instance(&mut self, id: InstanceId, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         let rt = self.rt.clone();
-        self.status = "Deleting…".into();
+        self.rename = None;
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = rt
@@ -465,7 +577,7 @@ impl KmineApp {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(())) => {
-                        this.delete_target = None;
+                        this.pinned.remove(&id);
                         if this.selected == Some(id) {
                             this.selected = None;
                             this.settings = None;
@@ -503,6 +615,7 @@ impl KmineApp {
                     Ok(Ok(_)) => {
                         this.refresh_accounts();
                         this.accounts.error = None;
+                        this.ensure_skin(cx);
                     }
                     Ok(Err(EngineError::AuthNotConfigured)) => {
                         this.accounts.error = Some(accounts::AUTH_NOT_CONFIGURED_HINT.into());
@@ -532,6 +645,7 @@ impl KmineApp {
                     Ok(Ok(())) => {
                         this.refresh_accounts();
                         this.accounts.error = None;
+                        this.ensure_skin(cx);
                     }
                     Ok(Err(err)) => this.accounts.error = Some(err.to_string()),
                     Err(err) => this.accounts.error = Some(err.to_string()),
@@ -541,6 +655,32 @@ impl KmineApp {
             .ok();
         })
         .detach();
+    }
+
+    fn confirm_delete_account(
+        &mut self,
+        id: AccountId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .accounts
+            .accounts
+            .iter()
+            .find(|account| account.uuid == id)
+            .map(|account| account.username.clone())
+            .unwrap_or_else(|| "this account".into());
+        let this = cx.weak_entity();
+        confirm::danger(
+            window,
+            cx,
+            "Remove account",
+            format!("\"{name}\" will be signed out of kmine. Worlds stay on disk."),
+            "Remove",
+            move |_, cx| {
+                this.update(cx, |this, cx| this.delete_account(id, cx)).ok();
+            },
+        );
     }
 
     fn delete_account(&mut self, id: AccountId, cx: &mut Context<Self>) {
@@ -555,6 +695,7 @@ impl KmineApp {
                     Ok(Ok(())) => {
                         this.refresh_accounts();
                         this.accounts.error = None;
+                        this.ensure_skin(cx);
                     }
                     Ok(Err(err)) => this.accounts.error = Some(err.to_string()),
                     Err(err) => this.accounts.error = Some(err.to_string()),
@@ -590,6 +731,7 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id,
+            name: instance.name.clone(),
             title: "Preparing…".into(),
             done: 0,
             total: 0,
@@ -663,7 +805,7 @@ impl KmineApp {
         let engine = self.engine.clone();
         let rt = self.rt.clone();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(720.), px(420.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(860.), px(520.)), cx)),
             titlebar: Some(TitlebarOptions {
                 title: Some(format!("{name} — output").into()),
                 ..Default::default()
@@ -689,109 +831,160 @@ impl Render for KmineApp {
         div()
             .size_full()
             .relative()
-            .bg(cx.theme().background)
+            .when(self.show_create || self.show_accounts, |el| {
+                el.key_context("Modal").on_action({
+                    let this = this.clone();
+                    move |_: &Cancel, _, cx| {
+                        this.update(cx, |this, cx| {
+                            if this.show_create && this.status != "Creating…" {
+                                this.close_create(cx);
+                            } else if this.show_accounts && !this.accounts.busy {
+                                this.close_accounts(cx);
+                            }
+                        })
+                        .ok();
+                    }
+                })
+            })
+            .when(!crate::sidebar_is_glass(), |this| {
+                this.bg(cx.theme().background)
+            })
             .text_color(cx.theme().foreground)
             .child(
-                v_flex()
-                    .size_full()
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .child(instances::sidebar(
-                                &self.instances,
-                                self.selected,
-                                {
-                                    let this = this.clone();
-                                    move |id, window, cx| {
-                                        this.update(cx, |this, cx| {
-                                            this.select_instance(id, window, cx);
-                                        })
-                                        .ok();
-                                    }
-                                },
-                                {
-                                    let this = this.clone();
-                                    move |_, window, cx| {
-                                        this.update(cx, |this, cx| this.open_create(window, cx))
-                                            .ok();
-                                    }
-                                },
-                                {
-                                    let this = this.clone();
-                                    move |id, _, window, cx| {
-                                        this.update(cx, |this, cx| {
-                                            this.open_rename(id, window, cx);
-                                        })
-                                        .ok();
-                                    }
-                                },
-                                {
-                                    let this = this.clone();
-                                    move |id, _, _, cx| {
-                                        this.update(cx, |this, cx| this.open_delete(id, cx)).ok();
-                                    }
-                                },
-                                cx,
-                            ))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .h_full()
-                                    .min_w_0()
-                                    .bg(cx.theme().background)
-                                    .when_some(self.progress.as_ref(), |el, modal| {
-                                        el.child(progress::render(
-                                            modal,
-                                            {
-                                                let this = this.clone();
-                                                move |_, _, cx| {
-                                                    this.update(cx, |this, cx| {
-                                                        this.cancel_prepare(cx);
-                                                    })
-                                                    .ok();
-                                                }
-                                            },
-                                            cx,
-                                        ))
+                v_flex().size_full().child(
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(instances::sidebar(
+                            &self.instances,
+                            self.selected,
+                            &identity,
+                            self.skin_face.as_deref(),
+                            {
+                                let this = this.clone();
+                                move |id, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.select_instance(id, window, cx);
                                     })
-                                    .child(match selected {
-                                        Some(instance) => right_pane(
-                                            &instance,
-                                            pane,
-                                            &status,
-                                            &self.content_mods,
-                                            &self.content_resourcepacks,
-                                            &self.content_shaderpacks,
-                                            &self.quick_play,
-                                            self.settings.as_ref(),
-                                            &sandbox_status,
-                                            this.clone(),
-                                            cx,
-                                        )
-                                        .into_any_element(),
-                                        None => empty_state(cx).into_any_element(),
-                                    }),
-                            ),
-                    )
-                    .child(identity_footer(
-                        identity,
-                        {
-                            let this = this.clone();
-                            move |_, _, cx| {
-                                this.update(cx, |this, cx| this.open_accounts(cx)).ok();
-                            }
-                        },
-                        cx,
-                    )),
+                                    .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |_, window, cx| {
+                                    this.update(cx, |this, cx| this.open_create(window, cx))
+                                        .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |id, _, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.open_rename(id, window, cx);
+                                    })
+                                    .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.submit_rename(cx)).ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |id, _, window, cx| {
+                                    this.update(cx, |this, cx| this.open_delete(id, window, cx))
+                                        .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |id, _, _, cx| {
+                                    this.update(cx, |this, cx| this.toggle_pin(id, cx)).ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.open_accounts(cx)).ok();
+                                }
+                            },
+                            self.rename.as_ref(),
+                            &self.pinned,
+                            cx,
+                        ))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .h_full()
+                                .min_w_0()
+                                .bg(cx.theme().background)
+                                .border_l_1()
+                                .border_color(cx.theme().border)
+                                .overflow_hidden()
+                                .child(match selected {
+                                    Some(instance) => right_pane(
+                                        &instance,
+                                        pane,
+                                        &status,
+                                        &self.content_mods,
+                                        &self.content_resourcepacks,
+                                        &self.content_shaderpacks,
+                                        &self.quick_play,
+                                        self.settings.as_ref(),
+                                        &sandbox_status,
+                                        self.progress.as_ref().is_some_and(|p| p.id == instance.id),
+                                        this.clone(),
+                                        cx,
+                                    )
+                                    .into_any_element(),
+                                    None => empty_state(
+                                        {
+                                            let this = this.clone();
+                                            move |_, window, cx| {
+                                                this.update(cx, |this, cx| {
+                                                    this.open_create(window, cx)
+                                                })
+                                                .ok();
+                                            }
+                                        },
+                                        cx,
+                                    )
+                                    .into_any_element(),
+                                }),
+                        ),
+                ),
             )
+            .when_some(self.progress.as_ref(), |el, modal| {
+                el.child(progress::render(
+                    modal,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.cancel_prepare(cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    cx,
+                ))
+            })
             .when_some(
                 self.create.as_ref().filter(|_| self.show_create),
                 |el, form| {
                     el.child(create_instance::render(
                         form,
                         &self.status,
+                        {
+                            let this = this.clone();
+                            move |loader, _, cx| {
+                                this.update(cx, |this, cx| this.set_create_loader(loader, cx))
+                                    .ok();
+                            }
+                        },
                         {
                             let this = this.clone();
                             move |_, _, cx| {
@@ -808,47 +1001,10 @@ impl Render for KmineApp {
                     ))
                 },
             )
-            .when_some(self.rename.as_ref(), |el, form| {
-                el.child(instances::rename_overlay(
-                    form,
-                    &self.status,
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.submit_rename(cx)).ok();
-                        }
-                    },
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.close_rename(cx)).ok();
-                        }
-                    },
-                    cx,
-                ))
-            })
-            .when_some(self.delete_target.as_ref(), |el, (_, name)| {
-                el.child(instances::delete_overlay(
-                    name,
-                    &self.status,
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.confirm_delete(cx)).ok();
-                        }
-                    },
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.close_delete(cx)).ok();
-                        }
-                    },
-                    cx,
-                ))
-            })
             .when(self.show_accounts, |el| {
                 el.child(accounts::render(
                     &self.accounts,
+                    |id| self.engine.cached_skin_face(id),
                     {
                         let this = this.clone();
                         move |id, _, cx| {
@@ -857,8 +1013,11 @@ impl Render for KmineApp {
                     },
                     {
                         let this = this.clone();
-                        move |id, _, cx| {
-                            this.update(cx, |this, cx| this.delete_account(id, cx)).ok();
+                        move |id, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.confirm_delete_account(id, window, cx);
+                            })
+                            .ok();
                         }
                     },
                     {
@@ -892,6 +1051,7 @@ fn right_pane(
     quick_play: &QuickPlayLists,
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
+    preparing: bool,
     this: WeakEntity<KmineApp>,
     cx: &App,
 ) -> impl IntoElement {
@@ -899,100 +1059,170 @@ fn right_pane(
     v_flex()
         .size_full()
         .min_w_0()
-        .child(pane_switcher(pane, this.clone(), cx))
-        .child(match pane {
-            InstancePane::Play => {
-                let this = this.clone();
-                instance_play::play_tab(
-                    instance,
-                    status,
-                    quick_play,
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| {
-                                this.play_or_stop(id, None, cx);
-                            })
-                            .ok();
-                        }
+        .pt(px(36.))
+        .px_8()
+        .pb_8()
+        .id("instance-main")
+        .overflow_y_scroll()
+        .child(
+            v_flex()
+                .w_full()
+                .gap_5()
+                .child(instance_header(instance, cx))
+                .child(pane_switcher(pane, this.clone(), cx))
+                .when(
+                    !status.is_empty() && pane != InstancePane::Settings,
+                    |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(status.to_string()),
+                        )
                     },
-                    move |quick, _, _, cx| {
-                        this.update(cx, |this, cx| {
-                            this.play_or_stop(id, Some(quick), cx);
-                        })
-                        .ok();
-                    },
-                    cx,
                 )
-                .into_any_element()
-            }
-            InstancePane::Content => instance_content::content_tab(
-                mods,
-                resourcepacks,
-                shaderpacks,
-                {
-                    let this = this.clone();
-                    move |path, enabled, _, cx| {
-                        this.update(cx, |this, cx| {
-                            this.toggle_content(path, enabled, cx);
-                        })
-                        .ok();
-                    }
-                },
-                {
-                    let this = this.clone();
-                    move |path, _, _, cx| {
-                        this.update(cx, |this, cx| {
-                            this.delete_content(path, cx);
-                        })
-                        .ok();
-                    }
-                },
-                cx,
-            )
-            .into_any_element(),
-            InstancePane::Settings => match settings {
-                Some(form) => instance_settings::settings_tab(
-                    form,
-                    sandbox_status,
-                    status,
-                    {
-                        let this = this.clone();
-                        move |enabled, _, cx| {
-                            this.update(cx, |this, cx| {
-                                this.set_sandbox(enabled, cx);
-                            })
-                            .ok();
-                        }
+                .child(match pane {
+                    InstancePane::Play => instance_play::play_tab(
+                        instance,
+                        quick_play,
+                        preparing,
+                        {
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.play_or_stop(id, None, cx);
+                                })
+                                .ok();
+                            }
+                        },
+                        {
+                            let this = this.clone();
+                            move |target, _, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.play_or_stop(id, Some(target), cx);
+                                })
+                                .ok();
+                            }
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                    InstancePane::Content => instance_content::content_tab(
+                        mods,
+                        resourcepacks,
+                        shaderpacks,
+                        {
+                            let this = this.clone();
+                            move |path, enabled, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.toggle_content(path, enabled, cx);
+                                })
+                                .ok();
+                            }
+                        },
+                        {
+                            let this = this.clone();
+                            move |path, _, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.confirm_delete_content(path, window, cx);
+                                })
+                                .ok();
+                            }
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                    InstancePane::Settings => match settings {
+                        Some(form) => instance_settings::settings_tab(
+                            form,
+                            sandbox_status,
+                            status,
+                            {
+                                let this = this.clone();
+                                move |enabled, _, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.set_sandbox(enabled, cx);
+                                    })
+                                    .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.save_settings(cx);
+                                    })
+                                    .ok();
+                                }
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
+                        None => div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Loading settings…")
+                            .into_any_element(),
                     },
-                    {
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| {
-                                this.save_settings(cx);
-                            })
-                            .ok();
-                        }
-                    },
-                    cx,
+                }),
+        )
+}
+
+fn instance_header(instance: &InstanceSummary, cx: &App) -> impl IntoElement {
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_xl()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_ellipsis()
+                        .child(instance.name.clone()),
                 )
-                .into_any_element(),
-                None => empty_state(cx).into_any_element(),
-            },
-        })
+                .when(instance.running, |this| {
+                    this.child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .h(px(22.))
+                            .rounded(px(6.))
+                            .bg(cx.theme().success.opacity(0.18))
+                            .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().success)
+                                    .child("Running"),
+                            ),
+                    )
+                }),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(chip(instance.minecraft_version.clone(), cx))
+                .child(chip(loader_label(instance.loader), cx)),
+        )
 }
 
 fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> impl IntoElement {
     h_flex()
         .id("instance-pane-switcher")
-        .w_full()
-        .px_4()
-        .pt_3()
-        .gap_1()
         .flex_shrink_0()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(pane_button(
+        .gap_1()
+        .p(px(3.))
+        .rounded(px(10.))
+        .bg(cx.theme().muted)
+        .child(pane_tab(
             "pane-play",
             "Play",
             pane == InstancePane::Play,
@@ -1005,8 +1235,9 @@ fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> im
                     .ok();
                 }
             },
+            cx,
         ))
-        .child(pane_button(
+        .child(pane_tab(
             "pane-content",
             "Content",
             pane == InstancePane::Content,
@@ -1019,8 +1250,9 @@ fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> im
                     .ok();
                 }
             },
+            cx,
         ))
-        .child(pane_button(
+        .child(pane_tab(
             "pane-settings",
             "Settings",
             pane == InstancePane::Settings,
@@ -1033,50 +1265,65 @@ fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> im
                     .ok();
                 }
             },
+            cx,
         ))
 }
 
-fn pane_button(
+fn pane_tab(
     id: &'static str,
     label: &'static str,
     active: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let button = Button::new(id).label(label).on_click(on_click);
-    if active {
-        button.primary()
-    } else {
-        button.ghost()
-    }
-}
-
-fn identity_footer(
-    label: String,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
+    let (bg, fg) = if active {
+        (cx.theme().primary, cx.theme().primary_foreground)
+    } else {
+        (cx.theme().transparent, cx.theme().muted_foreground)
+    };
     h_flex()
-        .id("identity-footer")
-        .w_full()
-        .h(px(40.))
-        .px_2()
+        .id(id)
+        .h(px(28.))
+        .px_3()
         .items_center()
-        .flex_shrink_0()
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .child(
-            Button::new("accounts-identity")
-                .ghost()
-                .label(label)
-                .on_click(on_click),
-        )
+        .rounded(px(8.))
+        .bg(bg)
+        .text_color(fg)
+        .cursor_pointer()
+        .when(!active, |this| {
+            this.hover(|this| this.text_color(cx.theme().foreground))
+        })
+        .on_click(on_click)
+        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
 }
 
-fn empty_state(cx: &App) -> impl IntoElement {
+fn empty_state(
+    on_create: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    use gpui_component::button::{Button, ButtonVariants};
+
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
-        .text_color(cx.theme().muted_foreground)
-        .child("Select an instance")
+        .gap_3()
+        .child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::MEDIUM)
+                .child("No instance selected"),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("Create one to download, launch, and keep local mods."),
+        )
+        .child(
+            Button::new("empty-create")
+                .primary()
+                .label("New instance")
+                .on_click(on_create),
+        )
 }

@@ -3,7 +3,7 @@ mod processors;
 pub use processors::{run_processors, subst_arg};
 
 use crate::error::EngineError;
-use crate::http::HttpFiles;
+use crate::http::{DownloadJob, HttpFiles};
 use crate::ids::Loader;
 use crate::mojang::{Artifact, Library, LibraryDownloads, VersionInfo};
 use crate::paths::LauncherPaths;
@@ -254,12 +254,8 @@ async fn fetch_installer_libraries(
     for lib in &mut libs {
         ensure_library_artifact(lib);
     }
-    let total = libs.len() as u64;
-    if total == 0 {
-        progress.set("Forge libraries", 0, 0);
-        return Ok(());
-    }
-    for (i, lib) in libs.iter().enumerate() {
+    let mut jobs = Vec::new();
+    for lib in &libs {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
@@ -269,7 +265,6 @@ async fn fetch_installer_libraries(
             .and_then(|d| d.artifact.as_ref())
             .filter(|a| a.path.as_ref().is_some_and(|p| !p.is_empty()))
         else {
-            progress.set("Forge libraries", i as u64 + 1, total);
             continue;
         };
         let path = art.path.as_deref().unwrap();
@@ -281,11 +276,16 @@ async fn fetch_installer_libraries(
                 extract_zip_entry(&profile.installer_path, &entry, &dest)?;
             }
         } else {
-            http.download_sha1(url, &dest, art.sha1.as_deref(), cancel)
-                .await?;
+            jobs.push(DownloadJob {
+                url: url.to_string(),
+                dest,
+                sha1: art.sha1.clone(),
+                size: art.size.filter(|size| *size > 0),
+            });
         }
-        progress.set("Forge libraries", i as u64 + 1, total);
     }
+    http.download_many(jobs, "Forge libraries", progress, cancel)
+        .await?;
     Ok(())
 }
 

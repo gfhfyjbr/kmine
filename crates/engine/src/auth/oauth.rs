@@ -1,4 +1,4 @@
-use super::constants::{AUTH_URL, BIND, CLIENT_ID, REDIRECT_URL};
+use super::constants::{AUTH_URL, bind_addr, client_id, redirect_url};
 use crate::error::EngineError;
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope};
@@ -23,9 +23,9 @@ pub struct AuthCallback {
 }
 
 pub fn authorize_request() -> Result<AuthorizeRequest, EngineError> {
-    let client = BasicClient::new(ClientId::new(CLIENT_ID.to_string()))
+    let client = BasicClient::new(ClientId::new(client_id()))
         .set_auth_uri(parse_auth_url(AUTH_URL)?)
-        .set_redirect_uri(parse_redirect_url(REDIRECT_URL)?);
+        .set_redirect_uri(parse_redirect_url(&redirect_url())?);
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let (url, csrf) = client
         .authorize_url(CsrfToken::new_random)
@@ -55,7 +55,7 @@ pub(crate) fn wait_for_callback_deadline(
 ) -> Result<AuthCallback, EngineError> {
     listener
         .set_nonblocking(true)
-        .map_err(|e| EngineError::io(BIND, e))?;
+        .map_err(|e| EngineError::io(bind_addr(), e))?;
     loop {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -78,7 +78,7 @@ pub(crate) fn wait_for_callback_deadline(
             {
                 std::thread::sleep(ACCEPT_POLL);
             }
-            Err(err) => return Err(EngineError::io(BIND, err)),
+            Err(err) => return Err(EngineError::io(bind_addr(), err)),
         }
     }
 }
@@ -87,7 +87,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<Option<AuthCallback>, Engi
     let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
     let (method, target) = read_request(&mut stream)?;
-    let parsed = match url::Url::parse(&format!("http://{BIND}{target}")) {
+    let parsed = match url::Url::parse(&format!("http://{}{target}", bind_addr())) {
         Ok(url) => url,
         Err(_) => {
             write_response(&mut stream, 400, "text/plain", "Bad Request");
@@ -141,7 +141,7 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String), EngineError>
     loop {
         let n = stream
             .read(&mut tmp)
-            .map_err(|e| EngineError::io(BIND, e))?;
+            .map_err(|e| EngineError::io(bind_addr(), e))?;
         if n == 0 {
             return Err(EngineError::AuthFailed {
                 message: "empty auth callback".into(),

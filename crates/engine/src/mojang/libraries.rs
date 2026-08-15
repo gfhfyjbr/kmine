@@ -1,7 +1,7 @@
 use super::rules::{FeatureSet, current_os_name, rule_allows};
 use super::{Artifact, VersionInfo};
 use crate::error::EngineError;
-use crate::http::HttpFiles;
+use crate::http::{DownloadJob, HttpFiles};
 use crate::paths::LauncherPaths;
 use crate::types::ProgressSink;
 use sha1::{Digest, Sha1};
@@ -59,16 +59,15 @@ pub async fn fetch_libraries(
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
 ) -> Result<Vec<PathBuf>, EngineError> {
-    let total = artifacts.len() as u64;
     let mut dests = Vec::with_capacity(artifacts.len());
-    for (i, artifact) in artifacts.iter().enumerate() {
+    let mut jobs = Vec::new();
+    for artifact in artifacts {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
         let dest = crate::paths::safe_join(&paths.cache_libraries, &artifact.path)?;
         if artifact.url.is_empty() {
             if dest.is_file() {
-                progress.set("Libraries", (i as u64) + 1, total);
                 dests.push(dest);
                 continue;
             }
@@ -77,14 +76,16 @@ pub async fn fetch_libraries(
                 io::Error::new(io::ErrorKind::NotFound, "library missing (no download url)"),
             ));
         }
-        http.download_sha1(&artifact.url, &dest, artifact.sha1.as_deref(), cancel)
-            .await?;
-        progress.set("Libraries", (i as u64) + 1, total);
+        jobs.push(DownloadJob {
+            url: artifact.url.clone(),
+            dest: dest.clone(),
+            sha1: artifact.sha1.clone(),
+            size: artifact.size.filter(|size| *size > 0),
+        });
         dests.push(dest);
     }
-    if artifacts.is_empty() {
-        progress.set("Libraries", 0, 0);
-    }
+    http.download_many(jobs, "Libraries", progress, cancel)
+        .await?;
     Ok(dests)
 }
 

@@ -9,6 +9,7 @@ use crate::http::HttpFiles;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::instance_not_found;
 use crate::java::resolve_java;
+use crate::logfmt::LogDecoder;
 use crate::mojang::{
     ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, extract_natives, fetch_assets,
     fetch_client, fetch_libraries, join_classpath, natives_dir_name, select_libraries,
@@ -378,6 +379,19 @@ impl Engine {
             auth_access_token: mc_token,
             user_type: "msa".into(),
             version_name: version.id.clone(),
+            version_type: if version.version_type.is_empty() {
+                "release".into()
+            } else {
+                version.version_type.clone()
+            },
+            client_id: crate::auth::client_id(),
+            auth_xuid: String::new(),
+            user_properties: "{}".into(),
+            classpath_separator: if cfg!(windows) {
+                ";".into()
+            } else {
+                ":".into()
+            },
             game_directory: cwd.to_string_lossy().into_owned(),
             assets_root: assets_root.to_string_lossy().into_owned(),
             assets_index_name,
@@ -746,11 +760,15 @@ fn pump_std_lines(
     tokio::task::spawn_blocking(move || {
         use io::BufRead;
         let reader = io::BufReader::new(out);
+        let mut decoder = LogDecoder::new();
         for line in reader.lines() {
             let Ok(line) = line else {
                 break;
             };
-            let text = redact_line_with_tokens(&line, &tokens);
+            publish_log(&mut decoder, &line, &tokens, id, stream, &events);
+        }
+        for text in decoder.finish() {
+            let text = redact_line_with_tokens(&text, &tokens);
             let _ = events.send(Event::LogLine {
                 instance_id: id,
                 stream,
@@ -792,8 +810,31 @@ async fn pump_lines<R: tokio::io::AsyncRead + Unpin>(
     tokens: &[String],
 ) {
     let mut lines = BufReader::new(reader).lines();
+    let mut decoder = LogDecoder::new();
     while let Ok(Some(line)) = lines.next_line().await {
-        let text = redact_line_with_tokens(&line, tokens);
+        publish_log(&mut decoder, &line, tokens, id, stream, events);
+    }
+    for text in decoder.finish() {
+        let text = redact_line_with_tokens(&text, tokens);
+        let _ = events.send(Event::LogLine {
+            instance_id: id,
+            stream,
+            text,
+        });
+    }
+}
+
+fn publish_log(
+    decoder: &mut LogDecoder,
+    line: &str,
+    tokens: &[String],
+    id: InstanceId,
+    stream: LogStream,
+    events: &tokio::sync::broadcast::Sender<Event>,
+) {
+    let redacted = redact_line_with_tokens(line, tokens);
+    for text in decoder.push_line(&redacted) {
+        let text = redact_line_with_tokens(&text, tokens);
         let _ = events.send(Event::LogLine {
             instance_id: id,
             stream,

@@ -31,6 +31,12 @@ pub struct VersionInfo {
     pub downloads: Option<VersionDownloads>,
     pub java_version: Option<JavaVersion>,
     pub logging: Option<Logging>,
+    #[serde(default = "default_version_type", rename = "type")]
+    pub version_type: String,
+}
+
+fn default_version_type() -> String {
+    "release".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]

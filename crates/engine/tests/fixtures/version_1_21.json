@@ -1,5 +1,6 @@
 {
   "id": "1.21.1",
+  "type": "release",
   "mainClass": "net.minecraft.client.main.Main",
   "arguments": {
     "game": [
@@ -11,6 +12,7 @@
       "--uuid", "${auth_uuid}",
       "--accessToken", "${auth_access_token}",
       "--userType", "${user_type}",
+      "--versionType", "${version_type}",
       { "rules": [{ "action": "allow", "features": { "is_demo_user": true } }], "value": "--demo" },
       { "rules": [{ "action": "allow", "features": { "is_quick_play_singleplayer": true } }], "value": ["--quickPlaySingleplayer", "${quickPlaySingleplayer}"] }
     ],

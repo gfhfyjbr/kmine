@@ -1,5 +1,5 @@
 use super::constants::{
-    CLIENT_ID, MC_LOGIN_URL, MC_PROFILE_URL, REDIRECT_URL, TOKEN_URL, XBOX_AUTH_URL, XSTS_URL,
+    MC_LOGIN_URL, MC_PROFILE_URL, TOKEN_URL, XBOX_AUTH_URL, XSTS_URL, client_id, redirect_url,
 };
 use crate::error::EngineError;
 use crate::http::HttpFiles;
@@ -270,8 +270,9 @@ async fn refresh_msa_token(
     refresh: &str,
     now: DateTime<Utc>,
 ) -> Result<(String, Token), EngineError> {
+    let id = client_id();
     let params = [
-        ("client_id", CLIENT_ID),
+        ("client_id", id.as_str()),
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh),
         ("scope", "XboxLive.signin XboxLive.offline_access"),
@@ -287,11 +288,13 @@ async fn exchange_code(
     pkce_verifier: &str,
     now: DateTime<Utc>,
 ) -> Result<(String, Token), EngineError> {
+    let id = client_id();
+    let redirect = redirect_url();
     let params = [
-        ("client_id", CLIENT_ID),
+        ("client_id", id.as_str()),
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("redirect_uri", REDIRECT_URL),
+        ("redirect_uri", redirect.as_str()),
         ("code_verifier", pkce_verifier),
     ];
     let token = post_msa_token(http, &endpoints.token_url, &params).await?;
@@ -403,7 +406,8 @@ async fn minecraft_login(
     if status.as_u16() == 403 {
         return Err(EngineError::AuthFailed {
             message: format!(
-                "Minecraft blocked this Azure app (403). Request API access at https://aka.ms/mce-reviewappid with client id {CLIENT_ID}"
+                "Minecraft blocked this Azure app (403). Request API access at https://aka.ms/mce-reviewappid with client id {}",
+                client_id()
             ),
         });
     }

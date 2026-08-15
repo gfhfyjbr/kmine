@@ -157,6 +157,8 @@ pub struct QuickPlayLists {
 pub struct QuickPlayWorld {
     pub folder: String,
     pub label: String,
+    /// Last in-game world preview (`saves/<folder>/icon.png`), if present.
+    pub icon: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

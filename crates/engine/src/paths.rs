@@ -43,6 +43,7 @@ pub struct LauncherPaths {
     pub cache_assets_virtual: PathBuf,
     pub cache_runtime: PathBuf,
     pub cache_natives: PathBuf,
+    pub cache_skins: PathBuf,
 }
 
 impl LauncherPaths {
@@ -59,6 +60,7 @@ impl LauncherPaths {
             cache_assets_virtual: assets.join("virtual").join("legacy"),
             cache_runtime: cache.join("runtime"),
             cache_natives: cache.join("natives"),
+            cache_skins: cache.join("skins"),
             root,
         }
     }
@@ -80,6 +82,7 @@ impl LauncherPaths {
             &self.cache_assets_virtual,
             &self.cache_runtime,
             &self.cache_natives,
+            &self.cache_skins,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| EngineError::io(dir, e))?;
         }
@@ -124,6 +127,7 @@ mod tests {
         assert!(paths.cache_assets_virtual.is_dir());
         assert!(paths.cache_runtime.is_dir());
         assert!(paths.cache_natives.is_dir());
+        assert!(paths.cache_skins.is_dir());
     }
 
     #[test]

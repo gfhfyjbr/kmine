@@ -2,7 +2,9 @@ mod constants;
 pub(crate) mod oauth;
 mod tokens;
 
-pub use constants::{AUTH_URL, BIND, CLIENT_ID, REDIRECT_URL, TOKEN_URL};
+pub use constants::{
+    AUTH_URL, BIND, CLIENT_ID, REDIRECT_URL, TOKEN_URL, bind_addr, client_id, redirect_url,
+};
 pub use tokens::{
     AccountSecrets, AuthEndpoints, Token, TokenPersist, Xsts, ensure_mc_token,
     ensure_mc_token_owned, login_with_code, secret_id,
