@@ -13,7 +13,7 @@ use kmine_engine::{InstanceId, InstanceSummary};
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::chrome::{instance_cover, loader_label};
+use crate::chrome::{instance_cover, loader_label, running_mark};
 use crate::smooth_scroll::SmoothScroll;
 
 pub struct RenameForm {
@@ -336,16 +336,7 @@ fn instance_row(
                                     .line_clamp(2)
                                     .text_color(name_color)
                                     .child(instance.name.clone()),
-                            )
-                            .when(instance.running, |this| {
-                                this.child(
-                                    div()
-                                        .size(px(7.))
-                                        .rounded_full()
-                                        .bg(cx.theme().success)
-                                        .flex_shrink_0(),
-                                )
-                            }),
+                            ),
                     )
                     .child(
                         div()
@@ -363,6 +354,19 @@ fn instance_row(
                     )
                 }),
         )
+        .when(instance.running && !editing, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .right(px(10.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .group_hover(group.clone(), |style| style.invisible())
+                    .child(running_mark(20.0, cx)),
+            )
+        })
         .when(!editing, |this| {
             this.child(
                 h_flex()

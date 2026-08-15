@@ -320,6 +320,15 @@ pub fn chip(text: impl Into<String>, cx: &App) -> impl IntoElement {
         .child(text.into())
 }
 
+pub fn running_mark(height: f32, cx: &App) -> impl IntoElement {
+    div()
+        .w(px(2.))
+        .h(px(height))
+        .rounded_full()
+        .bg(cx.theme().success)
+        .flex_shrink_0()
+}
+
 pub fn running_pill(cx: &App) -> impl IntoElement {
     h_flex()
         .items_center()
@@ -328,7 +337,7 @@ pub fn running_pill(cx: &App) -> impl IntoElement {
         .h(px(22.))
         .rounded(px(6.))
         .bg(cx.theme().success.opacity(0.16))
-        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+        .child(running_mark(10.0, cx))
         .child(
             div()
                 .text_xs()
