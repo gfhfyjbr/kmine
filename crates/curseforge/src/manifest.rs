@@ -1,4 +1,5 @@
 use crate::Error;
+use crate::types::File;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::io::{Cursor, Read};
@@ -51,6 +52,20 @@ pub struct ManifestFile {
 
 fn default_required() -> bool {
     true
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPack {
+    pub manifest: Manifest,
+    pub files: Vec<ResolvedPackFile>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedPackFile {
+    pub project_id: u32,
+    pub file_id: u32,
+    pub required: bool,
+    pub file: File,
 }
 
 impl Manifest {

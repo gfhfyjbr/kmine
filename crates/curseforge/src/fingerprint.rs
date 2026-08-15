@@ -1,5 +1,39 @@
 //! CurseForge file fingerprint: whitespace-stripped MurmurHash2 (32-bit, seed 1).
 
+use crate::types::File;
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FingerprintMatches {
+    pub exact: Vec<FingerprintMatch>,
+    pub unmatched: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FingerprintMatch {
+    pub id: u32,
+    pub file: File,
+    pub latest_files: Vec<File>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FingerprintEnvelope {
+    #[serde(default)]
+    pub exact_matches: Vec<ExactMatch>,
+    #[serde(default)]
+    pub unmatched_fingerprints: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExactMatch {
+    pub id: u32,
+    pub file: File,
+    #[serde(default)]
+    pub latest_files: Vec<File>,
+}
+
 pub fn fingerprint(bytes: &[u8]) -> u32 {
     let filtered: Vec<u8> = bytes
         .iter()

@@ -228,6 +228,109 @@ impl Client {
             .await
     }
 
+    pub async fn resolve_pack(&self, manifest: &crate::Manifest) -> Result<crate::ResolvedPack, Error> {
+        let ids: Vec<u32> = manifest.files.iter().map(|f| f.file_id).collect();
+        let fetched = self.get_files(&ids).await?;
+        let mut by_id = std::collections::HashMap::new();
+        for f in fetched {
+            by_id.insert(f.id, f);
+        }
+        let mut files = Vec::new();
+        for row in &manifest.files {
+            match by_id.remove(&row.file_id) {
+                Some(file) => files.push(crate::ResolvedPackFile {
+                    project_id: row.project_id,
+                    file_id: row.file_id,
+                    required: row.required,
+                    file,
+                }),
+                None if row.required => {
+                    return Err(Error::NotFound {
+                        kind: crate::ResourceKind::File,
+                        id: row.file_id,
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(crate::ResolvedPack {
+            manifest: manifest.clone(),
+            files,
+        })
+    }
+
+    pub async fn resolve_required_deps(
+        &self,
+        roots: &[File],
+        game_version: &str,
+        loader: Option<crate::ModLoaderType>,
+    ) -> Result<Vec<File>, Error> {
+        use std::collections::{HashSet, VecDeque};
+        let mut seen: HashSet<u32> = roots.iter().map(|f| f.mod_id).collect();
+        let mut queue: VecDeque<u32> = roots
+            .iter()
+            .flat_map(|f| f.required_mod_ids())
+            .filter(|id| !seen.contains(id))
+            .collect();
+        let mut out = Vec::new();
+        while let Some(mod_id) = queue.pop_front() {
+            if !seen.insert(mod_id) {
+                continue;
+            }
+            if out.len() >= 512 {
+                return Err(Error::InvalidQuery {
+                    message: "dependency walk exceeded 512",
+                });
+            }
+            let m = self.get_mod(mod_id).await?;
+            let idx = m.file_index_for(game_version, loader).ok_or_else(|| {
+                Error::NoCompatibleFile {
+                    mod_id,
+                    game_version: game_version.to_string(),
+                }
+            })?;
+            let file = self.get_file(mod_id, idx.file_id).await?;
+            for dep in file.required_mod_ids() {
+                if !seen.contains(&dep) {
+                    queue.push_back(dep);
+                }
+            }
+            out.push(file);
+        }
+        Ok(out)
+    }
+
+    pub async fn fingerprints(
+        &self,
+        fingerprints: &[u32],
+    ) -> Result<crate::FingerprintMatches, Error> {
+        if fingerprints.is_empty() {
+            return Ok(crate::FingerprintMatches {
+                exact: Vec::new(),
+                unmatched: Vec::new(),
+            });
+        }
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            fingerprints: &'a [u32],
+        }
+        let data: crate::fingerprint::FingerprintEnvelope = self
+            .post_data("/v1/fingerprints/432", &Body { fingerprints })
+            .await?;
+        Ok(crate::FingerprintMatches {
+            exact: data
+                .exact_matches
+                .into_iter()
+                .map(|e| crate::FingerprintMatch {
+                    id: e.id,
+                    file: e.file,
+                    latest_files: e.latest_files,
+                })
+                .collect(),
+            unmatched: data.unmatched_fingerprints,
+        })
+    }
+
     pub async fn download(&self, file: &File) -> Result<crate::Downloaded, Error> {
         let primary = crate::resolve_download_url(file).ok_or(Error::NoDownloadUrl {
             mod_id: file.mod_id,
@@ -1059,5 +1162,126 @@ mod tests {
                 file_id: 7
             }
         ));
+    }
+
+    fn file_json(id: u32, mod_id: u32, req: Option<u32>) -> String {
+        let dep = match req {
+            Some(mid) => format!(r#"[{{"modId":{mid},"relationType":3}}]"#),
+            None => "[]".into(),
+        };
+        format!(
+            r#"{{"id":{id},"gameId":432,"modId":{mod_id},"isAvailable":true,"displayName":"f.jar","fileName":"f.jar","releaseType":1,"fileStatus":4,"hashes":[],"fileLength":1,"downloadCount":0,"gameVersions":[],"sortableGameVersions":[],"dependencies":{dep},"isServerPack":false,"isEarlyAccessContent":false,"fileFingerprint":1,"modules":[]}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_batches_and_drops_optional_missing() {
+        let server = MockServer::start().await;
+        let body = format!(r#"{{"data":[{}]}}"#, file_json(5707939, 430225, None));
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let mut manifest =
+            crate::Manifest::parse(include_bytes!("../tests/fixtures/manifest_sf5.json")).unwrap();
+        manifest.files.push(crate::ManifestFile {
+            project_id: 9,
+            file_id: 9,
+            required: false,
+        });
+        let resolved = test_client(&server)
+            .await
+            .resolve_pack(&manifest)
+            .await
+            .unwrap();
+        assert_eq!(resolved.files.len(), 1);
+        assert_eq!(resolved.files[0].file_id, 5707939);
+        assert_eq!(resolved.files[0].file.mod_id, 430225);
+    }
+
+    #[tokio::test]
+    async fn resolve_pack_missing_required_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(br#"{"data":[]}"#, "application/json"))
+            .mount(&server)
+            .await;
+        let manifest =
+            crate::Manifest::parse(include_bytes!("../tests/fixtures/manifest_sf5.json")).unwrap();
+        let err = test_client(&server)
+            .await
+            .resolve_pack(&manifest)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::NotFound {
+                kind: crate::ResourceKind::File,
+                id: 5707939
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_required_deps_returns_only_new_file() {
+        let server = MockServer::start().await;
+        let mod_body = r#"{"data":{"id":2,"gameId":432,"name":"lib","slug":"lib","links":{},"summary":"","status":4,"downloadCount":0,"isFeatured":false,"categories":[],"authors":[],"screenshots":[],"latestFiles":[],"latestFilesIndexes":[{"gameVersion":"1.20.1","fileId":22,"filename":"lib.jar","releaseType":1,"modLoader":1}],"isAvailable":true,"thumbsUpCount":0}}"#;
+        Mock::given(method("GET"))
+            .and(path("/v2/mods/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(mod_body.as_bytes(), "application/json"))
+            .mount(&server)
+            .await;
+        let file_body = format!(r#"{{"data":{}}}"#, file_json(22, 2, None));
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/2/files/22"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(file_body, "application/json"))
+            .mount(&server)
+            .await;
+        let root: crate::File = serde_json::from_str(&file_json(11, 1, Some(2))).unwrap();
+        let deps = test_client(&server)
+            .await
+            .resolve_required_deps(&[root], "1.20.1", Some(crate::ModLoaderType::Forge))
+            .await
+            .unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].id, 22);
+        assert_eq!(deps[0].mod_id, 2);
+    }
+
+    #[tokio::test]
+    async fn fingerprints_maps_exact_and_unmatched() {
+        let server = MockServer::start().await;
+        let file = file_json(5754631, 250898, None);
+        let body = format!(
+            r#"{{"data":{{"exactMatches":[{{"id":5754631,"file":{file},"latestFiles":[]}}],"unmatchedFingerprints":[9]}}}}"#
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/fingerprints/432"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let got = test_client(&server)
+            .await
+            .fingerprints(&[3871571640, 9])
+            .await
+            .unwrap();
+        assert_eq!(got.exact.len(), 1);
+        assert_eq!(got.exact[0].id, 5754631);
+        assert_eq!(got.unmatched, vec![9]);
+    }
+
+    #[tokio::test]
+    async fn fingerprints_empty_skips_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let got = test_client(&server).await.fingerprints(&[]).await.unwrap();
+        assert!(got.exact.is_empty());
+        assert!(got.unmatched.is_empty());
     }
 }
