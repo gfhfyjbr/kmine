@@ -1,7 +1,7 @@
 use crate::Error;
-use crate::search::{CategoryFilter, SearchQuery};
+use crate::search::{CategoryFilter, FileFilter, SearchQuery};
 use crate::types::{
-    Category, DEFAULT_BASE_URL, MINECRAFT_GAME_ID, Mod, Page, Pagination, SortOrder,
+    Category, DEFAULT_BASE_URL, File, MINECRAFT_GAME_ID, Mod, Page, Pagination, SortOrder,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -137,6 +137,73 @@ impl Client {
         self.get_data(&format!("/v1/mods/{mod_id}/description"), &[])
             .await
             .map_err(|e| map_http(e, Some((crate::ResourceKind::Mod, mod_id))))
+    }
+
+    pub async fn files(&self, mod_id: u32, filter: &FileFilter) -> Result<Page<File>, Error> {
+        if !(1..=crate::MAX_PAGE_SIZE).contains(&filter.page_size) {
+            return Err(Error::InvalidQuery {
+                message: "pageSize must be 1..=50",
+            });
+        }
+        if filter.index.saturating_add(filter.page_size) > crate::MAX_INDEX_PLUS_PAGE {
+            return Err(Error::InvalidQuery {
+                message: "index + pageSize exceeds 10000",
+            });
+        }
+        let mut q = vec![
+            ("index".into(), filter.index.to_string()),
+            ("pageSize".into(), filter.page_size.to_string()),
+        ];
+        if let Some(v) = &filter.game_version {
+            q.push(("gameVersion".into(), v.clone()));
+        }
+        if let Some(id) = filter.game_version_type_id {
+            q.push(("gameVersionTypeId".into(), id.to_string()));
+        }
+        if let Some(loader) = filter.loader {
+            q.push(("modLoaderType".into(), loader.as_u8().to_string()));
+        }
+        if let Some(cc) = filter.client_compatible {
+            q.push((
+                "clientCompatible".into(),
+                if cc { "true" } else { "false" }.into(),
+            ));
+        }
+        self.get_page(&format!("/v1/mods/{mod_id}/files"), &q).await
+    }
+
+    pub async fn get_file(&self, mod_id: u32, file_id: u32) -> Result<File, Error> {
+        self.get_data(&format!("/v1/mods/{mod_id}/files/{file_id}"), &[])
+            .await
+            .map_err(|e| map_http(e, Some((crate::ResourceKind::File, file_id))))
+    }
+
+    pub async fn get_files(&self, file_ids: &[u32]) -> Result<Vec<File>, Error> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for chunk in file_ids.chunks(crate::BATCH_SIZE) {
+            #[derive(serde::Serialize)]
+            struct Body<'a> {
+                #[serde(rename = "fileIds")]
+                file_ids: &'a [u32],
+            }
+            let part: Vec<File> = self
+                .post_data("/v1/mods/files", &Body { file_ids: chunk })
+                .await?;
+            out.extend(part);
+        }
+        Ok(out)
+    }
+
+    pub async fn changelog(&self, mod_id: u32, file_id: u32) -> Result<String, Error> {
+        self.get_data(
+            &format!("/v1/mods/{mod_id}/files/{file_id}/changelog"),
+            &[],
+        )
+        .await
+        .map_err(|e| map_http(e, Some((crate::ResourceKind::File, file_id))))
     }
 }
 
@@ -598,5 +665,118 @@ mod tests {
                 id: 1
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn get_file_404_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/250898/files/5754631"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = test_client(&server)
+            .await
+            .get_file(250898, 5754631)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::NotFound {
+                kind: crate::ResourceKind::File,
+                id: 5754631
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn files_sends_single_loader_and_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.20.1"))
+            .and(query_param("modLoaderType", "1"))
+            .and(query_param("index", "0"))
+            .and(query_param("pageSize", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":[],"pagination":{"index":0,"pageSize":20,"resultCount":0,"totalCount":0}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        test_client(&server)
+            .await
+            .files(
+                238222,
+                &crate::FileFilter {
+                    game_version: Some("1.20.1".into()),
+                    loader: Some(crate::ModLoaderType::Forge),
+                    ..crate::FileFilter::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_files_chunks_101_ids() {
+        use std::sync::{Arc, Mutex};
+        let server = MockServer::start().await;
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(CaptureSizes(sizes.clone()))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let ids: Vec<u32> = (1..=101).collect();
+        test_client(&server).await.get_files(&ids).await.unwrap();
+        let got = sizes.lock().unwrap().clone();
+        assert_eq!(got, vec![100, 1]);
+    }
+
+    #[tokio::test]
+    async fn changelog_unwraps_html() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/1/files/2/changelog"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":"<p>notes</p>"}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let html = test_client(&server).await.changelog(1, 2).await.unwrap();
+        assert_eq!(html, "<p>notes</p>");
+    }
+
+    #[tokio::test]
+    async fn get_files_empty_skips_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        assert!(
+            test_client(&server)
+                .await
+                .get_files(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    struct CaptureSizes(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+    impl wiremock::Respond for CaptureSizes {
+        fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+            let v: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            self.0
+                .lock()
+                .unwrap()
+                .push(v["fileIds"].as_array().unwrap().len());
+            ResponseTemplate::new(200).set_body_raw(br#"{"data":[]}"#, "application/json")
+        }
     }
 }
