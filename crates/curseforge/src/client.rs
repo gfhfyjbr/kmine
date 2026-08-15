@@ -107,6 +107,37 @@ impl Client {
         }
         self.get_page("/v2/mods/search", &q).await
     }
+
+    pub async fn get_mod(&self, mod_id: u32) -> Result<Mod, Error> {
+        self.get_data(&format!("/v2/mods/{mod_id}"), &[])
+            .await
+            .map_err(|e| map_http(e, Some((crate::ResourceKind::Mod, mod_id))))
+    }
+
+    pub async fn get_mods(&self, mod_ids: &[u32]) -> Result<Vec<Mod>, Error> {
+        if mod_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for chunk in mod_ids.chunks(crate::BATCH_SIZE) {
+            #[derive(serde::Serialize)]
+            struct Body<'a> {
+                #[serde(rename = "modIds")]
+                mod_ids: &'a [u32],
+            }
+            let part: Vec<Mod> = self
+                .post_data("/v2/mods/get-mods-by-ids", &Body { mod_ids: chunk })
+                .await?;
+            out.extend(part);
+        }
+        Ok(out)
+    }
+
+    pub async fn description(&self, mod_id: u32) -> Result<String, Error> {
+        self.get_data(&format!("/v1/mods/{mod_id}/description"), &[])
+            .await
+            .map_err(|e| map_http(e, Some((crate::ResourceKind::Mod, mod_id))))
+    }
 }
 
 impl std::fmt::Debug for Client {
@@ -204,7 +235,6 @@ impl Client {
         })
     }
 
-    #[allow(dead_code)] // reserved for POST batch endpoints
     pub(crate) async fn post_data<T: DeserializeOwned, B: Serialize>(
         &self,
         path: &str,
@@ -289,6 +319,13 @@ impl Client {
             url: url.to_string(),
             message: err.to_string(),
         })
+    }
+}
+
+fn map_http(err: Error, not_found: Option<(crate::ResourceKind, u32)>) -> Error {
+    match (&err, not_found) {
+        (Error::Http { status: 404, .. }, Some((kind, id))) => Error::NotFound { kind, id },
+        _ => err,
     }
 }
 
@@ -482,5 +519,84 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::InvalidQuery { .. }));
+    }
+
+    #[tokio::test]
+    async fn get_mod_404_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/mods/238222"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = test_client(&server).await.get_mod(238222).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::NotFound {
+                kind: crate::ResourceKind::Mod,
+                id: 238222
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_mod_ok() {
+        let server = MockServer::start().await;
+        let body = format!(
+            r#"{{"data":{}}}"#,
+            include_str!("../tests/fixtures/mod_jei.json")
+        );
+        Mock::given(method("GET"))
+            .and(path("/v2/mods/238222"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let m = test_client(&server).await.get_mod(238222).await.unwrap();
+        assert_eq!(m.slug, "jei");
+    }
+
+    #[tokio::test]
+    async fn get_mods_empty_skips_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let out = test_client(&server).await.get_mods(&[]).await.unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn description_unwraps_html() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/description"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":"<p>html</p>"}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let html = test_client(&server).await.description(238222).await.unwrap();
+        assert_eq!(html, "<p>html</p>");
+    }
+
+    #[tokio::test]
+    async fn description_404_is_not_found() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/1/description"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = test_client(&server).await.description(1).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::NotFound {
+                kind: crate::ResourceKind::Mod,
+                id: 1
+            }
+        ));
     }
 }
