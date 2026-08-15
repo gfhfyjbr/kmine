@@ -347,6 +347,10 @@ fn write_part_rename(src: &Path, dest: &Path) -> Result<(), EngineError> {
     let part = dest.with_file_name(format!("{name}.part"));
     let result = (|| {
         std::fs::copy(src, &part).map_err(|e| EngineError::io(&part, e))?;
+        // Windows `rename` fails if dest exists; Unix replaces. Match http::prepare_dest.
+        if dest.exists() {
+            std::fs::remove_file(dest).map_err(|e| EngineError::io(dest, e))?;
+        }
         std::fs::rename(&part, dest).map_err(|e| EngineError::io(dest, e))?;
         Ok(())
     })();
@@ -839,6 +843,51 @@ mod tests {
         let mc = engine.paths.instance_minecraft(&row.slug);
         assert_eq!(std::fs::read(mc.join("mods/foo.jar")).unwrap(), b"foo");
         assert_eq!(std::fs::read(mc.join("mods/cloth.jar")).unwrap(), b"dep");
+    }
+
+    #[test]
+    fn write_part_rename_replaces_existing_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.jar");
+        let dest = dir.path().join("foo.jar");
+        std::fs::write(&src, b"new").unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        super::write_part_rename(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!dest.with_file_name("foo.jar.part").exists());
+    }
+
+    #[tokio::test]
+    async fn install_content_overwrites_existing_enabled() {
+        let (_root, engine) = test_engine();
+        engine.add_provider(Arc::new(FakePack::ok()));
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Forge".into(),
+                minecraft_version: "1.20.1".into(),
+                loader: Loader::Forge,
+                loader_version: Some("47.4.0".into()),
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let row = engine.get_instance(id).unwrap().unwrap();
+        let mods = engine.paths.instance_minecraft(&row.slug).join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(mods.join("foo.jar"), b"old").unwrap();
+        engine
+            .install_content(
+                id,
+                ProviderId::CURSEFORGE,
+                &CatalogProjectId("p".into()),
+                "foo",
+                &NoopProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(mods.join("foo.jar")).unwrap(), b"foo");
+        assert!(!mods.join("foo.jar.disabled").exists());
     }
 
     #[tokio::test]
