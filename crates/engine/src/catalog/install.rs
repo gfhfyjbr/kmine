@@ -199,7 +199,7 @@ async fn fetch_blob(
     cancel: &CancellationToken,
 ) -> Result<(PathBuf, CatalogBlob), EngineError> {
     check_cancel(cancel)?;
-    let dest = cache::blob_path(paths, provider, &file.file_id, &file.file_name);
+    let dest = cache::blob_path(paths, provider, &file.file_id, &file.file_name)?;
     if dest.is_file() {
         let existing = std::fs::read(&dest).map_err(|e| CatalogError::Message(e.to_string()))?;
         if !existing.is_empty() {
@@ -215,7 +215,7 @@ async fn fetch_blob(
     }
     let blob = catalog.download(file).await?;
     check_cancel(cancel)?;
-    let dest = cache::blob_path(paths, provider, &file.file_id, &blob.file_name);
+    let dest = cache::blob_path(paths, provider, &file.file_id, &blob.file_name)?;
     cache::put_blob(&dest, &blob)?;
     Ok((dest, blob))
 }

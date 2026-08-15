@@ -1,6 +1,7 @@
 use super::provider::ProviderId;
 use super::types::{CatalogBlob, CatalogError};
-use crate::paths::LauncherPaths;
+use crate::error::EngineError;
+use crate::paths::{LauncherPaths, safe_join};
 use std::path::{Path, PathBuf};
 
 pub fn blob_path(
@@ -8,12 +9,10 @@ pub fn blob_path(
     provider: ProviderId,
     file_id: &str,
     file_name: &str,
-) -> PathBuf {
-    paths
-        .cache_catalog_files
-        .join(provider.0)
-        .join(file_id)
-        .join(file_name)
+) -> Result<PathBuf, EngineError> {
+    let provider_dir = safe_join(&paths.cache_catalog_files, provider.0)?;
+    let file_dir = safe_join(&provider_dir, file_id)?;
+    safe_join(&file_dir, file_name)
 }
 
 pub fn put_blob(path: &Path, blob: &CatalogBlob) -> Result<(), CatalogError> {
@@ -49,4 +48,48 @@ pub fn put_blob(path: &Path, blob: &CatalogBlob) -> Result<(), CatalogError> {
 pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
     use sha1::{Digest, Sha1};
     hex::encode(Sha1::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::provider::ProviderId;
+    use crate::paths::LauncherPaths;
+
+    #[test]
+    fn blob_path_stays_under_catalog_files() {
+        let paths = LauncherPaths::new(PathBuf::from("/tmp/kmine-test"));
+        let dest = blob_path(&paths, ProviderId::CURSEFORGE, "2", "jei.jar").unwrap();
+        assert!(dest.starts_with(&paths.cache_catalog_files));
+        assert_eq!(
+            dest,
+            paths
+                .cache_catalog_files
+                .join("curseforge")
+                .join("2")
+                .join("jei.jar")
+        );
+    }
+
+    #[test]
+    fn blob_path_rejects_escape() {
+        let paths = LauncherPaths::new(PathBuf::from("/tmp/kmine-test"));
+        let cases = [
+            ("../x", "a.jar"),
+            ("2", "../escape.jar"),
+            ("2", "/tmp/evil.jar"),
+            ("/tmp", "a.jar"),
+            ("2", "foo/../../evil.jar"),
+            ("..", "a.jar"),
+        ];
+        for (file_id, file_name) in cases {
+            let err = blob_path(&paths, ProviderId::CURSEFORGE, file_id, file_name).unwrap_err();
+            assert!(
+                matches!(err, EngineError::Io { .. }),
+                "{file_id}/{file_name}: {err:?}"
+            );
+        }
+        assert!(blob_path(&paths, ProviderId(".."), "2", "a.jar").is_err());
+        assert!(blob_path(&paths, ProviderId("/tmp"), "2", "a.jar").is_err());
+    }
 }
