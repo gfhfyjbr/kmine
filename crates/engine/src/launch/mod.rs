@@ -5,6 +5,7 @@ use crate::fabric::{
     profile_url,
 };
 use crate::forge::{merge_forge, prepare_forge, run_processors};
+use crate::neoforge::prepare_neoforge;
 use crate::http::HttpFiles;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::instance_not_found;
@@ -246,8 +247,8 @@ impl Engine {
             Loader::Quilt => merge_quilt_profile(&http, &row, version, progress, cancel).await?,
             _ => version,
         };
-        let forge = if row.loader == Loader::Forge {
-            Some(
+        let installer = match row.loader {
+            Loader::Forge => Some(
                 prepare_forge(
                     &http,
                     &self.paths,
@@ -257,9 +258,19 @@ impl Engine {
                     cancel,
                 )
                 .await?,
-            )
-        } else {
-            None
+            ),
+            Loader::NeoForge => Some(
+                prepare_neoforge(
+                    &http,
+                    &self.paths,
+                    &row.minecraft_version,
+                    row.loader_version.as_deref(),
+                    progress,
+                    cancel,
+                )
+                .await?,
+            ),
+            _ => None,
         };
 
         check_cancel(cancel)?;
@@ -279,7 +290,7 @@ impl Engine {
         let client = fetch_client(&http, &self.paths, &version, cancel).await?;
         progress.set("Client", 1, 1);
 
-        if let Some((profile, forge_version)) = forge {
+        if let Some((profile, forge_version)) = installer {
             check_cancel(cancel)?;
             run_processors(&java, &profile, &self.paths, &client, cancel).await?;
             version = merge_forge(version, forge_version);
@@ -1083,6 +1094,36 @@ mod tests {
                 }
             ),
             "forge prepare must proceed past LoaderUnavailable, got {err:?}"
+        );
+        assert!(matches!(err, EngineError::NoAccount));
+    }
+
+    #[tokio::test]
+    async fn prepare_neoforge_offline_errors_without_account() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "N".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::NeoForge,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                EngineError::LoaderUnavailable {
+                    loader: Loader::NeoForge,
+                    ..
+                }
+            ),
+            "neoforge prepare must proceed past LoaderUnavailable, got {err:?}"
         );
         assert!(matches!(err, EngineError::NoAccount));
     }

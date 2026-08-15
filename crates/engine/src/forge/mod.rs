@@ -216,7 +216,7 @@ pub async fn prepare_forge(
     Ok((profile, forge_version))
 }
 
-async fn fetch_installer_sha1(
+pub(crate) async fn fetch_installer_sha1(
     http: &HttpFiles,
     installer_url: &str,
     dest: &Path,
@@ -243,7 +243,7 @@ async fn fetch_installer_sha1(
     }
 }
 
-async fn fetch_installer_libraries(
+pub(crate) async fn fetch_installer_libraries(
     http: &HttpFiles,
     paths: &LauncherPaths,
     profile: &ForgeInstallProfile,
@@ -350,7 +350,7 @@ fn join_maven_url(base: &str, path: &str) -> String {
     }
 }
 
-fn cmp_forge_version(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn cmp_forge_version(a: &str, b: &str) -> std::cmp::Ordering {
     version_nums(a).cmp(&version_nums(b)).then_with(|| a.cmp(b))
 }
 

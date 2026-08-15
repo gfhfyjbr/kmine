@@ -3,6 +3,7 @@ pub mod content;
 pub mod error;
 pub mod fabric;
 pub mod forge;
+pub mod neoforge;
 pub mod quilt;
 pub mod http;
 pub mod ids;
