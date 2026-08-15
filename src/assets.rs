@@ -12,6 +12,14 @@ const CUSTOM: &[(&str, &[u8])] = &[
         "icons/trash.svg",
         include_bytes!("../assets/icons/trash.svg"),
     ),
+    (
+        "icons/covers/neoforge.jpg",
+        include_bytes!("../assets/icons/covers/neoforge.jpg"),
+    ),
+    (
+        "icons/covers/quilt.jpg",
+        include_bytes!("../assets/icons/covers/quilt.jpg"),
+    ),
 ];
 
 pub struct Assets;

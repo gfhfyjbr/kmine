@@ -39,6 +39,8 @@ pub enum Loader {
     Vanilla,
     Fabric,
     Forge,
+    NeoForge,
+    Quilt,
 }
 
 impl Loader {
@@ -47,6 +49,8 @@ impl Loader {
             Loader::Vanilla => "vanilla",
             Loader::Fabric => "fabric",
             Loader::Forge => "forge",
+            Loader::NeoForge => "neoforge",
+            Loader::Quilt => "quilt",
         }
     }
 }
@@ -70,5 +74,18 @@ mod tests {
             Loader::Forge
         );
         assert_eq!(serde_json::to_string(&Loader::Forge).unwrap(), "\"forge\"");
+        assert_eq!(
+            serde_json::from_str::<Loader>("\"neoforge\"").unwrap(),
+            Loader::NeoForge
+        );
+        assert_eq!(
+            serde_json::from_str::<Loader>("\"quilt\"").unwrap(),
+            Loader::Quilt
+        );
+        assert_eq!(
+            serde_json::to_string(&Loader::NeoForge).unwrap(),
+            "\"neoforge\""
+        );
+        assert_eq!(serde_json::to_string(&Loader::Quilt).unwrap(), "\"quilt\"");
     }
 }

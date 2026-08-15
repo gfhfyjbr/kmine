@@ -177,14 +177,30 @@ pub fn loader_icon(loader: Loader) -> IconName {
         Loader::Vanilla => IconName::Globe,
         Loader::Fabric => IconName::Frame,
         Loader::Forge => IconName::Cpu,
+        Loader::NeoForge => IconName::Cpu,
+        Loader::Quilt => IconName::Frame,
     }
 }
 
 pub fn loader_tint(loader: Loader, cx: &App) -> (gpui::Hsla, gpui::Hsla) {
     match loader {
         Loader::Vanilla => (cx.theme().muted, cx.theme().muted_foreground),
-        Loader::Fabric => (gpui::rgb(0x243036).into(), gpui::rgb(0xb7c9cc).into()),
-        Loader::Forge => (gpui::rgb(0x30261f).into(), gpui::rgb(0xd0b8a0).into()),
+        Loader::Fabric | Loader::Quilt => {
+            (gpui::rgb(0x243036).into(), gpui::rgb(0xb7c9cc).into())
+        }
+        Loader::Forge | Loader::NeoForge => {
+            (gpui::rgb(0x30261f).into(), gpui::rgb(0xd0b8a0).into())
+        }
+    }
+}
+
+pub fn default_cover(loader: Loader) -> &'static str {
+    match loader {
+        Loader::Vanilla => "icons/covers/vanilla.jpg",
+        Loader::Fabric => "icons/covers/fabric.jpg",
+        Loader::Forge => "icons/covers/forge.jpg",
+        Loader::NeoForge => "icons/covers/neoforge.jpg",
+        Loader::Quilt => "icons/covers/quilt.jpg",
     }
 }
 
@@ -214,6 +230,8 @@ pub fn loader_label(loader: Loader) -> &'static str {
         Loader::Vanilla => "Vanilla",
         Loader::Fabric => "Fabric",
         Loader::Forge => "Forge",
+        Loader::NeoForge => "NeoForge",
+        Loader::Quilt => "Quilt",
     }
 }
 

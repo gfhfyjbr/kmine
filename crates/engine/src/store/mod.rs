@@ -304,6 +304,8 @@ fn loader_from_db(s: &str) -> Result<Loader, rusqlite::Error> {
         "vanilla" => Ok(Loader::Vanilla),
         "fabric" => Ok(Loader::Fabric),
         "forge" => Ok(Loader::Forge),
+        "neoforge" => Ok(Loader::NeoForge),
+        "quilt" => Ok(Loader::Quilt),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
