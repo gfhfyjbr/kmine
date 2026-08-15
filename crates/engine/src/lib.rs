@@ -50,7 +50,7 @@ use std::time::Instant;
 
 pub struct Engine {
     pub(crate) paths: LauncherPaths,
-    pub(crate) store: parking_lot::Mutex<Store>,
+    pub(crate) store: Arc<parking_lot::Mutex<Store>>,
     pub(crate) master_key: [u8; 32],
     pub(crate) events: tokio::sync::broadcast::Sender<Event>,
     pub(crate) processes: Arc<parking_lot::Mutex<HashMap<InstanceId, Running>>>,
@@ -59,7 +59,9 @@ pub struct Engine {
     pub(crate) login_lock: tokio::sync::Mutex<bool>,
     pub(crate) login_cancel: parking_lot::Mutex<Option<CancellationToken>>,
     pub(crate) rt: tokio::runtime::Handle,
-    pub(crate) providers: parking_lot::Mutex<Vec<Arc<dyn catalog::CatalogProvider>>>,
+    pub(crate) providers: Arc<parking_lot::Mutex<Vec<Arc<dyn catalog::CatalogProvider>>>>,
+    pub(crate) catalog_backend_url: Arc<parking_lot::Mutex<String>>,
+    pub(crate) catalog_backend_token: Option<String>,
 }
 
 pub struct Running {
@@ -119,7 +121,7 @@ impl Engine {
         let (events, _) = tokio::sync::broadcast::channel(16384);
         Ok(Self {
             paths,
-            store: parking_lot::Mutex::new(store),
+            store: Arc::new(parking_lot::Mutex::new(store)),
             master_key,
             events,
             processes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -128,7 +130,11 @@ impl Engine {
             login_lock: tokio::sync::Mutex::new(false),
             login_cancel: parking_lot::Mutex::new(None),
             rt: tokio::runtime::Handle::current(),
-            providers: parking_lot::Mutex::new(Vec::new()),
+            providers: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            catalog_backend_url: Arc::new(parking_lot::Mutex::new(
+                catalog::key::default_catalog_backend_url(),
+            )),
+            catalog_backend_token: catalog::key::catalog_backend_token_from_env(),
         })
     }
 

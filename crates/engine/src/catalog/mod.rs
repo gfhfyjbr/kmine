@@ -1,5 +1,6 @@
 //! Catalog types, provider trait surface, and manifest helpers.
 
+pub mod key;
 pub mod loader_id;
 pub mod provider;
 pub mod query;

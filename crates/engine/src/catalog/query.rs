@@ -8,7 +8,10 @@ use crate::Engine;
 use std::sync::Arc;
 
 impl Engine {
-    fn provider(&self, id: ProviderId) -> Result<Arc<dyn CatalogProvider>, super::CatalogError> {
+    pub(crate) fn provider(
+        &self,
+        id: ProviderId,
+    ) -> Result<Arc<dyn CatalogProvider>, super::CatalogError> {
         self.providers
             .lock()
             .iter()
