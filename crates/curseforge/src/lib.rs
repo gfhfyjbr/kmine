@@ -6,6 +6,7 @@
 mod asar;
 mod client;
 mod dmg;
+mod download;
 mod error;
 mod extract;
 mod fetch;
@@ -15,6 +16,7 @@ mod search;
 mod types;
 
 pub use client::{Client, ClientBuilder};
+pub use download::{Downloaded, cdn_file_url, resolve_download_url};
 pub use error::{Error, ResourceKind};
 pub use extract::{CfCoreKey, CfKeyError, extract_from_bytes, extract_from_path};
 pub use fetch::{LATEST_MAC_DMG, extract_from_source, extract_from_url};

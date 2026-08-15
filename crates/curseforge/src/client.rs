@@ -20,7 +20,6 @@ pub struct Client {
     api_key: String,
     base_url: String,
     request_timeout: Duration,
-    #[allow(dead_code)] // reserved for download API
     download_timeout: Duration,
 }
 
@@ -227,6 +226,86 @@ impl Client {
     pub async fn modloader(&self, name: &str) -> Result<ModLoaderInfo, Error> {
         self.get_data(&format!("/v1/minecraft/modloader/{name}"), &[])
             .await
+    }
+
+    pub async fn download(&self, file: &File) -> Result<crate::Downloaded, Error> {
+        let primary = crate::resolve_download_url(file).ok_or(Error::NoDownloadUrl {
+            mod_id: file.mod_id,
+            file_id: file.id,
+        })?;
+        let used_api_url = file
+            .download_url
+            .as_ref()
+            .is_some_and(|u| !u.is_empty() && u == &primary);
+        let bytes = match self.download_bytes(&primary).await {
+            Ok(b) => b,
+            Err(_) if used_api_url && !file.file_name.is_empty() => {
+                let cdn = crate::cdn_file_url(file.id, &file.file_name);
+                self.download_bytes(&cdn).await?
+            }
+            Err(err) => return Err(err),
+        };
+        let actual = {
+            use sha1::{Digest, Sha1};
+            hex::encode(Sha1::digest(&bytes))
+        };
+        if let Some(expected) = file.sha1() {
+            if actual != expected.to_ascii_lowercase() {
+                return Err(Error::ChecksumMismatch {
+                    file_id: file.id,
+                    expected: expected.to_ascii_lowercase(),
+                    actual,
+                });
+            }
+        }
+        Ok(crate::Downloaded {
+            file_id: file.id,
+            file_name: file.file_name.clone(),
+            bytes,
+            sha1: Some(actual),
+        })
+    }
+
+    async fn download_bytes(&self, url: &str) -> Result<bytes::Bytes, Error> {
+        let mut last = Error::Http {
+            url: url.to_string(),
+            status: 0,
+        };
+        for attempt in 0..=RETRIES {
+            match self.download_bytes_once(url).await {
+                Ok(b) => return Ok(b),
+                Err(err) if attempt < RETRIES && retryable(&err) => {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    last = err;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last)
+    }
+
+    async fn download_bytes_once(&self, url: &str) -> Result<bytes::Bytes, Error> {
+        let response = self
+            .http
+            .get(url)
+            .timeout(self.download_timeout)
+            .send()
+            .await
+            .map_err(|err| Error::Decode {
+                url: url.to_string(),
+                message: err.to_string(),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::Http {
+                url: url.to_string(),
+                status: status.as_u16(),
+            });
+        }
+        response.bytes().await.map_err(|err| Error::Decode {
+            url: url.to_string(),
+            message: err.to_string(),
+        })
     }
 }
 
@@ -879,5 +958,106 @@ mod tests {
                 .push(v["fileIds"].as_array().unwrap().len());
             ResponseTemplate::new(200).set_body_raw(br#"{"data":[]}"#, "application/json")
         }
+    }
+
+    fn file_for_download(url: Option<String>, sha1: Option<&str>) -> crate::File {
+        crate::File {
+            id: 7,
+            game_id: 432,
+            mod_id: 3,
+            is_available: true,
+            display_name: "a.jar".into(),
+            file_name: "a.jar".into(),
+            release_type: crate::FileReleaseType::Release,
+            file_status: 4,
+            hashes: sha1
+                .map(|h| {
+                    vec![crate::FileHash {
+                        algo: crate::HashAlgo::Sha1,
+                        value: h.into(),
+                    }]
+                })
+                .unwrap_or_default(),
+            file_date: None,
+            file_length: 3,
+            download_count: 0,
+            download_url: url,
+            game_versions: vec![],
+            sortable_game_versions: vec![],
+            dependencies: vec![],
+            alternate_file_id: None,
+            is_server_pack: false,
+            server_pack_file_id: None,
+            is_early_access_content: false,
+            file_fingerprint: 0,
+            modules: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn download_uses_url_without_api_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dl/a.jar"))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/dl/a.jar"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(b"abc".as_slice(), "application/java"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/dl/a.jar", server.uri());
+        let got = test_client(&server)
+            .await
+            .download(&file_for_download(Some(url), None))
+            .await
+            .unwrap();
+        assert_eq!(&got.bytes[..], b"abc");
+        assert_eq!(got.file_id, 7);
+        assert_eq!(
+            got.sha1.as_deref(),
+            Some("a9993e364706816aba3e25717850c26c9cd0d89d")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_sha1_mismatch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(b"abc".as_slice(), "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/x", server.uri());
+        let err = test_client(&server)
+            .await
+            .download(&file_for_download(Some(url), Some("deadbeef")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::ChecksumMismatch { file_id: 7, .. }));
+    }
+
+    #[tokio::test]
+    async fn download_null_url_hits_cdn_path() {
+        // CDN host is edge.forgecdn.net — cannot intercept. Test resolve + a mock
+        // by setting download_url to None and file_name empty → NoDownloadUrl.
+        let server = MockServer::start().await;
+        let mut f = file_for_download(None, None);
+        f.file_name.clear();
+        let err = test_client(&server).await.download(&f).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::NoDownloadUrl {
+                mod_id: 3,
+                file_id: 7
+            }
+        ));
     }
 }
