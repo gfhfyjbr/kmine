@@ -3,6 +3,7 @@ mod assets;
 mod chrome;
 mod game_output;
 mod modals;
+mod providers;
 mod screens;
 mod theme;
 

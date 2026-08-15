@@ -3453,11 +3453,14 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 name = "kmine"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "kmine-curseforge",
  "kmine-engine",
+ "serde_json",
  "tokio",
 ]
 

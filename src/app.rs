@@ -17,6 +17,7 @@ use gpui_component::{
 };
 
 use crate::chrome::{chip, loader_label};
+use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, ContentEntry, ContentFolder, Engine, EngineError, Event,
     InstanceId, InstancePatch, InstanceSummary, Loader, QuickPlay, QuickPlayLists, SandboxStatus,
@@ -62,6 +63,8 @@ pub struct KmineApp {
 
 impl KmineApp {
     pub fn new(engine: Arc<Engine>, cx: &mut Context<Self>) -> Self {
+        engine.add_provider(Arc::new(CurseForgeProvider::new()));
+        engine.start_catalog_key_refresh();
         let accounts = AccountsModal::from_engine(&engine);
         let instances = engine.list_instances().unwrap_or_default();
         let mut this = Self {
