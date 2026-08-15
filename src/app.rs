@@ -410,16 +410,25 @@ impl KmineApp {
             }
         })
         .detach();
-        form.name.update(cx, |state, cx| state.focus(window, cx));
         self.create = Some(form);
         self.status.clear();
         self.show_create = true;
         cx.notify();
     }
 
-    fn set_create_loader(&mut self, loader: Loader, cx: &mut Context<Self>) {
+    fn set_create_kind(&mut self, loader: Loader, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(form) = self.create.as_mut() {
-            form.loader = loader;
+            form.phase = create_instance::CreatePhase::Loader(loader);
+            form.name.update(cx, |state, cx| state.focus(window, cx));
+            self.status.clear();
+            cx.notify();
+        }
+    }
+
+    fn create_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(form) = self.create.as_mut() {
+            form.phase = create_instance::CreatePhase::Kind;
+            self.status.clear();
             cx.notify();
         }
     }
@@ -451,7 +460,9 @@ impl KmineApp {
         if self.status == "Creating…" {
             return;
         }
-        let spec = form.spec(cx);
+        let Some(spec) = form.spec(cx) else {
+            return;
+        };
         let engine = self.engine.clone();
         let rt = self.rt.clone();
         self.status = "Creating…".into();
@@ -980,9 +991,17 @@ impl Render for KmineApp {
                         &self.status,
                         {
                             let this = this.clone();
-                            move |loader, _, cx| {
-                                this.update(cx, |this, cx| this.set_create_loader(loader, cx))
-                                    .ok();
+                            move |loader, window, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.set_create_kind(loader, window, cx)
+                                })
+                                .ok();
+                            }
+                        },
+                        {
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |this, cx| this.create_back(cx)).ok();
                             }
                         },
                         {

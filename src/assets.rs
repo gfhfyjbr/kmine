@@ -13,6 +13,18 @@ const CUSTOM: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/trash.svg"),
     ),
     (
+        "icons/covers/vanilla.jpg",
+        include_bytes!("../assets/icons/covers/vanilla.jpg"),
+    ),
+    (
+        "icons/covers/fabric.jpg",
+        include_bytes!("../assets/icons/covers/fabric.jpg"),
+    ),
+    (
+        "icons/covers/forge.jpg",
+        include_bytes!("../assets/icons/covers/forge.jpg"),
+    ),
+    (
         "icons/covers/neoforge.jpg",
         include_bytes!("../assets/icons/covers/neoforge.jpg"),
     ),
