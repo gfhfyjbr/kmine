@@ -1,7 +1,8 @@
 use crate::Error;
 use crate::search::{CategoryFilter, FileFilter, SearchQuery};
 use crate::types::{
-    Category, DEFAULT_BASE_URL, File, MINECRAFT_GAME_ID, Mod, Page, Pagination, SortOrder,
+    Category, DEFAULT_BASE_URL, File, MINECRAFT_GAME_ID, MinecraftVersion, Mod,
+    ModLoaderIndexEntry, ModLoaderInfo, Page, Pagination, SortOrder,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -204,6 +205,28 @@ impl Client {
         )
         .await
         .map_err(|e| map_http(e, Some((crate::ResourceKind::File, file_id))))
+    }
+
+    pub async fn minecraft_versions(&self) -> Result<Vec<MinecraftVersion>, Error> {
+        self.get_data("/v1/minecraft/version", &[]).await
+    }
+
+    pub async fn minecraft_version(&self, version: &str) -> Result<MinecraftVersion, Error> {
+        self.get_data(&format!("/v1/minecraft/version/{version}"), &[])
+            .await
+    }
+
+    pub async fn modloaders(&self) -> Result<Vec<ModLoaderIndexEntry>, Error> {
+        self.get_data(
+            "/v1/minecraft/modloader",
+            &[("includeAll".into(), "true".into())],
+        )
+        .await
+    }
+
+    pub async fn modloader(&self, name: &str) -> Result<ModLoaderInfo, Error> {
+        self.get_data(&format!("/v1/minecraft/modloader/{name}"), &[])
+            .await
     }
 }
 
@@ -766,6 +789,84 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn minecraft_versions_and_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/minecraft/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":[{"versionString":"1.20.1","approved":true}]}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/minecraft/version/1.20.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":{"versionString":"1.20.1"}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let c = test_client(&server).await;
+        assert_eq!(
+            c.minecraft_versions().await.unwrap()[0].version_string,
+            "1.20.1"
+        );
+        assert_eq!(
+            c.minecraft_version("1.20.1")
+                .await
+                .unwrap()
+                .version_string,
+            "1.20.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn modloaders_include_all_and_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/minecraft/modloader"))
+            .and(query_param("includeAll", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":[{"name":"forge-47.4.0","gameVersion":"1.20.1","latest":false,"recommended":true,"type":1}]}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/minecraft/modloader/forge-47.4.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":{"name":"forge-47.4.0","gameVersion":"1.20.1","latest":false,"recommended":true,"downloadUrl":"https://modloaders.forgecdn.net/x","filename":"forge-1.20.1-47.4.0.jar","installMethod":3,"versionJson":{"a":1},"installProfileJson":{"b":2}}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let c = test_client(&server).await;
+        let idx = c.modloaders().await.unwrap();
+        assert_eq!(idx[0].name, "forge-47.4.0");
+        assert_eq!(idx[0].loader_type, Some(crate::ModLoaderType::Forge));
+        let one = c.modloader("forge-47.4.0").await.unwrap();
+        assert_eq!(one.install_method, Some(3));
+        assert!(one.version_json.is_some());
+    }
+
+    #[tokio::test]
+    async fn modloader_404_is_http() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/minecraft/modloader/nope"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = test_client(&server)
+            .await
+            .modloader("nope")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Http { status: 404, .. }));
     }
 
     struct CaptureSizes(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
