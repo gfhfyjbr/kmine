@@ -20,5 +20,5 @@ pub use extract::{CfCoreKey, CfKeyError, extract_from_bytes, extract_from_path};
 pub use fetch::{LATEST_MAC_DMG, extract_from_source, extract_from_url};
 pub use fingerprint::fingerprint;
 pub use manifest::{Manifest, ManifestFile, ManifestLoader, ManifestMinecraft};
-pub use search::CategoryFilter;
+pub use search::{CategoryFilter, FileFilter, SearchQuery};
 pub use types::*;

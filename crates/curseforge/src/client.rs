@@ -1,6 +1,8 @@
 use crate::Error;
-use crate::search::CategoryFilter;
-use crate::types::{Category, DEFAULT_BASE_URL, MINECRAFT_GAME_ID, Page, Pagination};
+use crate::search::{CategoryFilter, SearchQuery};
+use crate::types::{
+    Category, DEFAULT_BASE_URL, MINECRAFT_GAME_ID, Mod, Page, Pagination, SortOrder,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -54,6 +56,56 @@ impl Client {
             CategoryFilter::ChildrenOf(class) => q.push(("classId".into(), class.0.to_string())),
         }
         self.get_data("/v1/categories", &q).await
+    }
+
+    pub async fn search(&self, query: &SearchQuery) -> Result<Page<Mod>, Error> {
+        query.validate()?;
+        let mut q = vec![
+            ("gameId".into(), MINECRAFT_GAME_ID.to_string()),
+            ("classId".into(), query.class.0.to_string()),
+            ("sortField".into(), query.sort_field.as_u8().to_string()),
+            (
+                "sortOrder".into(),
+                match query.sort_order {
+                    SortOrder::Asc => "asc".into(),
+                    SortOrder::Desc => "desc".into(),
+                },
+            ),
+            ("index".into(), query.index.to_string()),
+            ("pageSize".into(), query.page_size.to_string()),
+        ];
+        if let Some(text) = query.search.as_ref().filter(|s| !s.is_empty()) {
+            q.push(("searchFilter".into(), text.clone()));
+        }
+        if !query.categories.is_empty() {
+            q.push((
+                "categoryIds".into(),
+                serde_json::to_string(&query.categories).unwrap(),
+            ));
+        }
+        if !query.game_versions.is_empty() {
+            q.push((
+                "gameVersions".into(),
+                serde_json::to_string(&query.game_versions).unwrap(),
+            ));
+        }
+        if !query.loaders.is_empty() {
+            let ids: Vec<u8> = query.loaders.iter().map(|l| l.as_u8()).collect();
+            q.push((
+                "modLoaderTypes".into(),
+                serde_json::to_string(&ids).unwrap(),
+            ));
+        }
+        if let Some(slug) = query.slug.as_ref().filter(|s| !s.is_empty()) {
+            q.push(("slug".into(), slug.clone()));
+        }
+        if let Some(id) = query.author_id {
+            q.push(("primaryAuthorId".into(), id.to_string()));
+        }
+        if let Some(id) = query.game_version_type_id {
+            q.push(("gameVersionTypeId".into(), id.to_string()));
+        }
+        self.get_page("/v2/mods/search", &q).await
     }
 }
 
@@ -135,7 +187,6 @@ impl Client {
         Ok(env.data)
     }
 
-    #[allow(dead_code)] // reserved for paginated endpoints
     pub(crate) async fn get_page<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -371,5 +422,65 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Http { status: 404, .. }));
+    }
+
+    #[tokio::test]
+    async fn search_encodes_json_array_query_params() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/mods/search"))
+            .and(query_param("gameId", "432"))
+            .and(query_param("classId", "6"))
+            .and(query_param("gameVersions", r#"["1.20.1"]"#))
+            .and(query_param("modLoaderTypes", "[1]"))
+            .and(query_param("categoryIds", "[421]"))
+            .and(query_param("searchFilter", "jei"))
+            .and(query_param("sortField", "2"))
+            .and(query_param("sortOrder", "desc"))
+            .and(query_param("index", "0"))
+            .and(query_param("pageSize", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                br#"{"data":[],"pagination":{"index":0,"pageSize":20,"resultCount":0,"totalCount":0}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+        let page = test_client(&server)
+            .await
+            .search(
+                &crate::SearchQuery::new(ClassId::MODS)
+                    .search("jei")
+                    .game_version("1.20.1")
+                    .loader(crate::ModLoaderType::Forge)
+                    .category(421),
+            )
+            .await
+            .unwrap();
+        assert!(page.data.is_empty());
+        assert_eq!(page.pagination.page_size, 20);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_page_size_51() {
+        let server = MockServer::start().await;
+        let err = test_client(&server)
+            .await
+            .search(&crate::SearchQuery::new(ClassId::MODS).page_size(51))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidQuery { .. }));
+    }
+
+    #[tokio::test]
+    async fn search_rejects_eleven_categories() {
+        let server = MockServer::start().await;
+        let err = test_client(&server)
+            .await
+            .search(
+                &crate::SearchQuery::new(ClassId::MODS).categories((1..=11).collect::<Vec<_>>()),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidQuery { .. }));
     }
 }
