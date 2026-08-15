@@ -1,14 +1,16 @@
-//! CurseForge client bits for kmine. Starts with pulling the Core `x-api-key`
-//! out of an official app build; catalog HTTP can live here later.
+//! CurseForge Core client for Minecraft, plus official-app key extraction.
 //!
-//! The key is plain text inside uncompressed `app.asar` JS. Feed a `.app` tree,
-//! a raw `.asar`, a zip, a `.dmg`, a URL, or any in-memory blob. Nothing is
-//! written to disk.
+//! The catalog client never writes to disk. The key extractor reads an official
+//! build and also writes nothing.
 
 mod asar;
 mod dmg;
 mod extract;
 mod fetch;
+mod error;
+mod types;
 
 pub use extract::{CfCoreKey, CfKeyError, extract_from_bytes, extract_from_path};
 pub use fetch::{extract_from_source, extract_from_url, LATEST_MAC_DMG};
+pub use error::{Error, ResourceKind};
+pub use types::*;
