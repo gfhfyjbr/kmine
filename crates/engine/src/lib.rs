@@ -23,8 +23,8 @@ pub mod types;
 
 pub use catalog::{
     parse_manifest_loader, CatalogCategory, CatalogError, CatalogFile, CatalogFileFilter,
-    CatalogPage, CatalogProject, CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort,
-    ContentClass, ProviderId,
+    CatalogPage, CatalogProject, CatalogProjectDetail, CatalogProjectId, CatalogProvider,
+    CatalogQuery, CatalogSort, ContentClass, ProviderId,
 };
 pub use error::EngineError;
 pub use http::HttpFiles;
@@ -59,6 +59,7 @@ pub struct Engine {
     pub(crate) login_lock: tokio::sync::Mutex<bool>,
     pub(crate) login_cancel: parking_lot::Mutex<Option<CancellationToken>>,
     pub(crate) rt: tokio::runtime::Handle,
+    pub(crate) providers: parking_lot::Mutex<Vec<Arc<dyn catalog::CatalogProvider>>>,
 }
 
 pub struct Running {
@@ -127,6 +128,7 @@ impl Engine {
             login_lock: tokio::sync::Mutex::new(false),
             login_cancel: parking_lot::Mutex::new(None),
             rt: tokio::runtime::Handle::current(),
+            providers: parking_lot::Mutex::new(Vec::new()),
         })
     }
 

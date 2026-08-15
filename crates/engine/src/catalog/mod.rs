@@ -2,10 +2,11 @@
 
 pub mod loader_id;
 pub mod provider;
+pub mod query;
 pub mod types;
 
 pub use loader_id::parse_manifest_loader;
-pub use provider::ProviderId;
+pub use provider::{CatalogProvider, ProviderId};
 pub use types::{
     CatalogBlob, CatalogCategory, CatalogCredentials, CatalogError, CatalogFile, CatalogFileFilter,
     CatalogPage, CatalogProject, CatalogProjectDetail, CatalogProjectId, CatalogQuery,
