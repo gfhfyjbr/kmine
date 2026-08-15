@@ -1,9 +1,9 @@
 use super::cache;
 use super::provider::{CatalogProvider, ProviderId};
-use super::types::{CatalogBlob, CatalogError, CatalogFile, CatalogProjectId};
+use super::types::{CatalogBlob, CatalogError, CatalogFile, CatalogProjectId, ContentClass};
 use crate::error::EngineError;
 use crate::http::HttpFiles;
-use crate::ids::InstanceId;
+use crate::ids::{InstanceId, Loader};
 use crate::paths::{self, LauncherPaths};
 use crate::types::{ContentFolder, CreateInstance, ProgressSink};
 use crate::{Engine, Event};
@@ -51,6 +51,23 @@ impl Engine {
             cancel,
         )
         .await
+    }
+
+    pub async fn install_content(
+        &self,
+        instance: InstanceId,
+        provider: ProviderId,
+        project_id: &CatalogProjectId,
+        file_id: &str,
+        progress: &dyn ProgressSink,
+        cancel: &CancellationToken,
+    ) -> Result<(), EngineError> {
+        let _installing = InstallLock::acquire(&self.installing)?;
+        if self.preparing.lock().contains(&instance) {
+            return Err(EngineError::InstanceBusy);
+        }
+        self.install_content_locked(instance, provider, project_id, file_id, progress, cancel)
+            .await
     }
 
     pub async fn cache_remote_image(&self, url: &str) -> Result<PathBuf, EngineError> {
@@ -173,6 +190,71 @@ impl Engine {
         self.emit(Event::InstancesChanged);
         Ok(id)
     }
+
+    async fn install_content_locked(
+        &self,
+        instance: InstanceId,
+        provider: ProviderId,
+        project_id: &CatalogProjectId,
+        file_id: &str,
+        progress: &dyn ProgressSink,
+        cancel: &CancellationToken,
+    ) -> Result<(), EngineError> {
+        let result = async {
+            check_cancel(cancel)?;
+            let row = self
+                .get_instance(instance)?
+                .ok_or_else(|| crate::instance_not_found(&self.paths))?;
+            let catalog = self.provider(provider)?;
+
+            let root = catalog.file(project_id, file_id).await?;
+            check_cancel(cancel)?;
+            let class = match catalog.project(project_id).await {
+                Ok(detail) => detail.project.class,
+                Err(_) => root.class,
+            };
+            if class == ContentClass::Mods && row.loader == Loader::Vanilla {
+                return Err(
+                    CatalogError::Message("vanilla instance cannot install mods".into()).into(),
+                );
+            }
+
+            let (root_cached, root_blob) =
+                fetch_blob(&*catalog, &self.paths, provider, &root, cancel).await?;
+            check_cancel(cancel)?;
+
+            let loader_opt = match row.loader {
+                Loader::Vanilla => None,
+                loader => Some(loader),
+            };
+            let deps = catalog
+                .resolve_required_deps(
+                    std::slice::from_ref(&root),
+                    &row.minecraft_version,
+                    loader_opt,
+                )
+                .await?;
+            check_cancel(cancel)?;
+
+            let mc = self.paths.instance_minecraft(&row.slug);
+            let total = 1 + deps.len() as u64;
+            write_content_file(&mc, &root, &root_blob.file_name, &root_cached)?;
+            progress.set(&format!("Content 1/{total}"), 1, total);
+
+            for (idx, dep) in deps.iter().enumerate() {
+                check_cancel(cancel)?;
+                let (cached, blob) =
+                    fetch_blob(&*catalog, &self.paths, provider, dep, cancel).await?;
+                check_cancel(cancel)?;
+                write_content_file(&mc, dep, &blob.file_name, &cached)?;
+                let done = idx as u64 + 2;
+                progress.set(&format!("Content {done}/{total}"), done, total);
+            }
+            Ok(())
+        }
+        .await;
+        result.map_err(|err| prefer_cancelled(err, cancel))
+    }
 }
 
 fn check_cancel(cancel: &CancellationToken) -> Result<(), EngineError> {
@@ -218,6 +300,60 @@ async fn fetch_blob(
     let dest = cache::blob_path(paths, provider, &file.file_id, &blob.file_name)?;
     cache::put_blob(&dest, &blob)?;
     Ok((dest, blob))
+}
+
+fn write_content_file(
+    instance_minecraft: &Path,
+    file: &CatalogFile,
+    file_name: &str,
+    src: &Path,
+) -> Result<(), EngineError> {
+    let Some(folder) = file.class.dest_folder() else {
+        return Err(CatalogError::Message(format!(
+            "content file {} has no dest folder",
+            file.file_id
+        ))
+        .into());
+    };
+    let dest_dir = paths::safe_join(instance_minecraft, folder.dir_name())?;
+    std::fs::create_dir_all(&dest_dir).map_err(|e| EngineError::io(&dest_dir, e))?;
+    if let (Ok(parent), Ok(mc)) = (dest_dir.canonicalize(), instance_minecraft.canonicalize())
+        && !parent.starts_with(&mc)
+    {
+        return Err(EngineError::io(
+            dest_dir,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "dest escapes instance"),
+        ));
+    }
+    let dest_name = {
+        let disabled = format!("{file_name}.disabled");
+        if dest_dir.join(&disabled).exists() {
+            disabled
+        } else {
+            file_name.to_string()
+        }
+    };
+    let dest = paths::safe_join(&dest_dir, &dest_name)?;
+    write_part_rename(src, &dest)
+}
+
+fn write_part_rename(src: &Path, dest: &Path) -> Result<(), EngineError> {
+    let name = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        EngineError::io(
+            dest,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name"),
+        )
+    })?;
+    let part = dest.with_file_name(format!("{name}.part"));
+    let result = (|| {
+        std::fs::copy(src, &part).map_err(|e| EngineError::io(&part, e))?;
+        std::fs::rename(&part, dest).map_err(|e| EngineError::io(dest, e))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    result
 }
 
 fn copy_cached_file(
@@ -312,7 +448,7 @@ mod tests {
     use crate::ids::Loader;
     use crate::paths::LauncherPaths;
     use crate::store::MemoryKeychain;
-    use crate::types::ProgressSink;
+    use crate::types::{ContentFolder, CreateInstance, ProgressSink};
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -329,6 +465,7 @@ mod tests {
         Ok,
         BlockOnFile2,
         Escape,
+        ContentWithDep,
     }
 
     struct FakePack {
@@ -362,16 +499,25 @@ mod tests {
             }
         }
 
+        fn content_with_dep() -> Self {
+            Self {
+                mode: FakePackMode::ContentWithDep,
+                released: AtomicBool::new(false),
+                gate: Notify::new(),
+            }
+        }
+
         fn unblock(&self) {
             self.released.store(true, Ordering::Release);
             self.gate.notify_waiters();
         }
 
         fn catalog_file(&self, project_id: &CatalogProjectId, file_id: &str) -> CatalogFile {
-            let (class, file_name, file_length) = if file_id == "pack" {
-                (ContentClass::Modpacks, "pack.zip", 3)
-            } else {
-                (ContentClass::Mods, "jei.jar", 3)
+            let (class, file_name, file_length) = match file_id {
+                "pack" => (ContentClass::Modpacks, "pack.zip", 3),
+                "foo" => (ContentClass::Mods, "foo.jar", 3),
+                "dep" => (ContentClass::Mods, "cloth.jar", 3),
+                _ => (ContentClass::Mods, "jei.jar", 3),
             };
             CatalogFile {
                 provider: ProviderId::CURSEFORGE,
@@ -466,23 +612,31 @@ mod tests {
                     notified.await;
                 }
             }
-            if file.file_id == "pack" {
-                Ok(CatalogBlob {
+            match file.file_id.as_str() {
+                "pack" => Ok(CatalogBlob {
                     file_name: "pack.zip".into(),
                     bytes: b"zip".to_vec(),
                     sha1: None,
-                })
-            } else if file.file_id == "2" {
-                Ok(CatalogBlob {
+                }),
+                "2" => Ok(CatalogBlob {
                     file_name: "jei.jar".into(),
                     bytes: b"jar".to_vec(),
                     sha1: None,
-                })
-            } else {
-                Err(CatalogError::NotFound {
+                }),
+                "foo" => Ok(CatalogBlob {
+                    file_name: "foo.jar".into(),
+                    bytes: b"foo".to_vec(),
+                    sha1: None,
+                }),
+                "dep" => Ok(CatalogBlob {
+                    file_name: "cloth.jar".into(),
+                    bytes: b"dep".to_vec(),
+                    sha1: None,
+                }),
+                _ => Err(CatalogError::NotFound {
                     kind: CatalogResource::File,
                     id: file.file_id.clone(),
-                })
+                }),
             }
         }
         async fn parse_pack(&self, _: &[u8]) -> Result<PackManifestSpec, CatalogError> {
@@ -508,7 +662,13 @@ mod tests {
             _: &str,
             _: Option<Loader>,
         ) -> Result<Vec<CatalogFile>, CatalogError> {
-            Ok(vec![])
+            if matches!(self.mode, FakePackMode::ContentWithDep) {
+                Ok(vec![
+                    self.catalog_file(&CatalogProjectId("d".into()), "dep"),
+                ])
+            } else {
+                Ok(vec![])
+            }
         }
     }
 
@@ -607,6 +767,141 @@ mod tests {
                 &CatalogProjectId("p".into()),
                 "pack",
                 None,
+                &NoopProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::InstanceBusy));
+    }
+
+    #[tokio::test]
+    async fn install_content_mods_on_vanilla_fails() {
+        let (_root, engine) = test_engine();
+        engine.add_provider(Arc::new(FakePack::ok()));
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Vanilla".into(),
+                minecraft_version: "1.20.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .install_content(
+                id,
+                ProviderId::CURSEFORGE,
+                &CatalogProjectId("p".into()),
+                "foo",
+                &NoopProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            EngineError::Catalog(CatalogError::Message(ref m))
+                if m == "vanilla instance cannot install mods"
+        ));
+        let row = engine.get_instance(id).unwrap().unwrap();
+        let mods = engine.paths.instance_minecraft(&row.slug).join("mods");
+        assert!(!mods.join("foo.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn install_content_writes_root_and_required_dep() {
+        let (_root, engine) = test_engine();
+        engine.add_provider(Arc::new(FakePack::content_with_dep()));
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Forge".into(),
+                minecraft_version: "1.20.1".into(),
+                loader: Loader::Forge,
+                loader_version: Some("47.4.0".into()),
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        engine
+            .install_content(
+                id,
+                ProviderId::CURSEFORGE,
+                &CatalogProjectId("p".into()),
+                "foo",
+                &NoopProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let row = engine.get_instance(id).unwrap().unwrap();
+        let mc = engine.paths.instance_minecraft(&row.slug);
+        assert_eq!(std::fs::read(mc.join("mods/foo.jar")).unwrap(), b"foo");
+        assert_eq!(std::fs::read(mc.join("mods/cloth.jar")).unwrap(), b"dep");
+    }
+
+    #[tokio::test]
+    async fn install_content_overwrites_disabled_and_stays_disabled() {
+        let (_root, engine) = test_engine();
+        engine.add_provider(Arc::new(FakePack::ok()));
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Forge".into(),
+                minecraft_version: "1.20.1".into(),
+                loader: Loader::Forge,
+                loader_version: Some("47.4.0".into()),
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let row = engine.get_instance(id).unwrap().unwrap();
+        let mods = engine.paths.instance_minecraft(&row.slug).join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(mods.join("foo.jar.disabled"), b"old").unwrap();
+        engine
+            .install_content(
+                id,
+                ProviderId::CURSEFORGE,
+                &CatalogProjectId("p".into()),
+                "foo",
+                &NoopProgress,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(mods.join("foo.jar.disabled")).unwrap(),
+            b"foo"
+        );
+        assert!(!mods.join("foo.jar").exists());
+        let listed = engine.list_content(id, ContentFolder::Mods).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "foo.jar");
+        assert!(!listed[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn install_content_while_preparing_is_busy() {
+        let (_root, engine) = test_engine();
+        engine.add_provider(Arc::new(FakePack::ok()));
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Forge".into(),
+                minecraft_version: "1.20.1".into(),
+                loader: Loader::Forge,
+                loader_version: Some("47.4.0".into()),
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        engine.preparing.lock().insert(id);
+        let err = engine
+            .install_content(
+                id,
+                ProviderId::CURSEFORGE,
+                &CatalogProjectId("p".into()),
+                "foo",
                 &NoopProgress,
                 &CancellationToken::new(),
             )
