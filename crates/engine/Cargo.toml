@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aes-gcm = "0.10"
+async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"

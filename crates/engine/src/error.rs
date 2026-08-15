@@ -47,6 +47,8 @@ pub enum EngineError {
     Crypto,
     #[error("http {status} for {url}")]
     Http { url: String, status: u16 },
+    #[error(transparent)]
+    Catalog(#[from] crate::catalog::CatalogError),
 }
 
 impl EngineError {

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod catalog;
 pub mod content;
 pub mod error;
 pub mod fabric;
@@ -20,6 +21,11 @@ pub mod skin;
 pub mod store;
 pub mod types;
 
+pub use catalog::{
+    parse_manifest_loader, CatalogCategory, CatalogError, CatalogFile, CatalogFileFilter,
+    CatalogPage, CatalogProject, CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort,
+    ContentClass, ProviderId,
+};
 pub use error::EngineError;
 pub use http::HttpFiles;
 pub use ids::{AccountId, InstanceId, Loader};
