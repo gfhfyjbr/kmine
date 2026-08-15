@@ -62,6 +62,7 @@ pub struct Engine {
     pub(crate) providers: Arc<parking_lot::Mutex<Vec<Arc<dyn catalog::CatalogProvider>>>>,
     pub(crate) catalog_backend_url: Arc<parking_lot::Mutex<String>>,
     pub(crate) catalog_backend_token: Option<String>,
+    pub(crate) installing: parking_lot::Mutex<bool>,
 }
 
 pub struct Running {
@@ -135,6 +136,7 @@ impl Engine {
                 catalog::key::default_catalog_backend_url(),
             )),
             catalog_backend_token: catalog::key::catalog_backend_token_from_env(),
+            installing: parking_lot::Mutex::new(false),
         })
     }
 

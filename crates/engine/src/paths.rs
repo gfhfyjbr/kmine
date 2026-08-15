@@ -44,6 +44,8 @@ pub struct LauncherPaths {
     pub cache_runtime: PathBuf,
     pub cache_natives: PathBuf,
     pub cache_skins: PathBuf,
+    pub cache_catalog_files: PathBuf,
+    pub cache_catalog_images: PathBuf,
 }
 
 impl LauncherPaths {
@@ -61,6 +63,8 @@ impl LauncherPaths {
             cache_runtime: cache.join("runtime"),
             cache_natives: cache.join("natives"),
             cache_skins: cache.join("skins"),
+            cache_catalog_files: cache.join("catalog").join("files"),
+            cache_catalog_images: cache.join("catalog").join("images"),
             root,
         }
     }
@@ -83,6 +87,8 @@ impl LauncherPaths {
             &self.cache_runtime,
             &self.cache_natives,
             &self.cache_skins,
+            &self.cache_catalog_files,
+            &self.cache_catalog_images,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| EngineError::io(dir, e))?;
         }
@@ -128,6 +134,8 @@ mod tests {
         assert!(paths.cache_runtime.is_dir());
         assert!(paths.cache_natives.is_dir());
         assert!(paths.cache_skins.is_dir());
+        assert!(paths.cache_catalog_files.is_dir());
+        assert!(paths.cache_catalog_images.is_dir());
     }
 
     #[test]
