@@ -46,11 +46,24 @@ pub(super) fn profile_source(read_n: usize, write_n: usize, network: bool) -> St
          (allow file-read-metadata file-test-existence (subpath \"/\"))\n\
          (allow mach-lookup\n\
            (global-name \"com.apple.windowserver.active\")\n\
+           (global-name \"com.apple.windowserver.session\")\n\
            (global-name \"com.apple.windowmanager.server\")\n\
+           (global-name \"com.apple.coreservices.launchservicesd\")\n\
+           (global-name \"com.apple.iohideventsystem\")\n\
+           (global-name \"com.apple.distributed_notifications@Uv3\")\n\
+           (global-name \"com.apple.cfprefsd.agent\")\n\
            (global-name \"com.apple.fonts\")\n\
-           (global-name-prefix \"com.apple.audio.\"))\n\
+           (global-name-prefix \"com.apple.audio.\")\n\
+           (global-name-prefix \"com.apple.lsd.\"))\n\
+         (allow user-preference-read\n\
+           (preference-domain \"com.apple.HIToolbox\")\n\
+           (preference-domain \"kCFPreferencesAnyApplication\"))\n\
          (allow iokit-open-user-client\n\
-           (iokit-user-client-class \"IOHIDLibUserClient\" \"IOHIDParamUserClient\"))\n\
+           (iokit-user-client-class \"IOHIDLibUserClient\"\n\
+                                    \"IOHIDParamUserClient\"\n\
+                                    \"IOHIDEventServiceUserClient\"\n\
+                                    \"IOHIDUserDeviceUserClient\"\n\
+                                    \"AppleUSBMultitouchUserClient\"))\n\
          (allow process-exec* (literal (param \"JAVA\")) (subpath (param \"JAVA_HOME\")))\n\
          (allow file-map-executable (subpath (param \"JAVA_HOME\")))\n",
     );

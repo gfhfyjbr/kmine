@@ -129,6 +129,8 @@ pub struct InstanceSummary {
     pub last_played_at: Option<i64>,
     pub playtime_secs: u64,
     pub running: bool,
+    /// Cached cover PNG when the instance has a custom icon.
+    pub icon: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

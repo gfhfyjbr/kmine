@@ -2,24 +2,24 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, img, px,
+    div, img, px, App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable,
     alert::Alert,
     avatar::Avatar,
     button::{Button, ButtonVariants},
     h_flex,
     spinner::Spinner,
     tag::Tag,
-    v_flex,
+    v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable,
 };
 use kmine_engine::{AccountId, AccountSummary, Engine};
 
 use crate::chrome::{
-    empty_panel, modal, modal_body, modal_close, modal_footer, modal_header, sheet,
+    cta, empty_panel, modal, modal_body, modal_close, modal_footer, modal_header, sheet,
 };
+use crate::smooth_scroll::SmoothScroll;
 
 pub const AUTH_NOT_CONFIGURED_HINT: &str = "Set CLIENT_ID in crates/engine/src/auth/constants.rs and register redirect http://127.0.0.1:47821/auth";
 
@@ -62,6 +62,7 @@ pub fn render(
     on_delete: impl Fn(AccountId, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    scroll: &SmoothScroll,
     cx: &App,
 ) -> impl IntoElement {
     modal("accounts-overlay", !modal_state.busy, on_close.clone(), cx).child(
@@ -75,7 +76,14 @@ pub fn render(
             ))
             .child(
                 modal_body()
-                    .child(account_list(modal_state, skin, on_select, on_delete, cx))
+                    .child(account_list(
+                        modal_state,
+                        skin,
+                        on_select,
+                        on_delete,
+                        scroll,
+                        cx,
+                    ))
                     .when(modal_state.busy, |this| {
                         this.child(
                             h_flex()
@@ -108,8 +116,7 @@ pub fn render(
                             .on_click(on_close.clone()),
                     )
                     .child(
-                        Button::new("accounts-add")
-                            .primary()
+                        cta("accounts-add")
                             .label("Add account")
                             .loading(modal_state.busy)
                             .disabled(modal_state.busy)
@@ -125,14 +132,17 @@ fn account_list(
     skin: impl Fn(AccountId) -> Option<PathBuf>,
     on_select: impl Fn(AccountId, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(AccountId, &mut Window, &mut App) + Clone + 'static,
+    scroll: &SmoothScroll,
     cx: &App,
 ) -> impl IntoElement {
-    v_flex()
-        .id("accounts-list")
-        .min_h(px(140.))
-        .max_h(px(280.))
-        .gap_1()
-        .overflow_y_scroll()
+    scroll
+        .vertical(
+            v_flex()
+                .id("accounts-list")
+                .min_h(px(140.))
+                .max_h(px(280.))
+                .gap_1(),
+        )
         .when(modal_state.accounts.is_empty(), |this| {
             this.child(empty_panel(
                 IconName::User,
@@ -177,14 +187,14 @@ fn account_row(
         .py_2()
         .border_1()
         .border_color(if account.selected {
-            cx.theme().foreground.opacity(0.16)
+            cx.theme().border
         } else {
             cx.theme().border.opacity(0.)
         })
         .bg(if account.selected {
             cx.theme().muted
         } else {
-            cx.theme().popover
+            cx.theme().transparent
         })
         .cursor_pointer()
         .hover(|this| this.bg(cx.theme().muted))

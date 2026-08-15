@@ -1,10 +1,12 @@
 pub mod args;
 pub mod assets;
+pub mod jna;
 pub mod libraries;
 pub mod rules;
 
 pub use args::{ArgContext, build_args, interpolate, join_classpath};
 pub use assets::{AssetsRoot, fetch_assets};
+pub use jna::{apply_legacy_jna_workaround, upgrade_legacy_jna};
 pub use libraries::{
     LibraryArtifact, extract_natives, fetch_client, fetch_libraries, natives_dir_name,
     select_libraries,

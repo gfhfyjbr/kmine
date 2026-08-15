@@ -1,17 +1,35 @@
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
+
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClickEvent, Div, ElementId, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, Window, div, px,
+    Animation, AnimationExt, App, ClickEvent, Div, ElementId, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Styled, StyledImage,
+    Window, div, img, px,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName,
+    alert::Alert,
     animation::cubic_bezier,
     button::{Button, ButtonVariants},
-    h_flex, v_flex,
+    h_flex, v_flex, ActiveTheme, Icon, IconName,
 };
 use kmine_engine::Loader;
+
+/// Shared enter/transition motion. Longer settle than a snap, ease-out that
+/// glides into place instead of slamming.
+pub fn motion() -> Animation {
+    Animation::new(Duration::from_millis(400)).with_easing(cubic_bezier(0.16, 1., 0.3, 1.))
+}
+
+/// Primary action: white capsule, system type, extra horizontal padding.
+pub fn cta(id: impl Into<ElementId>) -> Button {
+    style_cta(Button::new(id).primary())
+}
+
+pub fn style_cta(button: Button) -> Button {
+    button.rounded(px(999.)).px_4()
+}
 
 pub fn dimmer(cx: &App) -> Div {
     div()
@@ -37,12 +55,7 @@ pub fn modal(
                 on_dismiss(&ClickEvent::default(), window, cx);
             })
         })
-        .with_animation(
-            "modal-fade",
-            Animation::new(Duration::from_millis(220))
-                .with_easing(cubic_bezier(0.32, 0.72, 0., 1.)),
-            |this, delta| this.opacity(delta),
-        )
+        .with_animation("modal-fade", motion(), |this, delta| this.opacity(delta))
 }
 
 pub fn sheet(cx: &App) -> impl ParentElement + Styled + IntoElement {
@@ -145,22 +158,47 @@ pub fn empty_panel(
     hint: impl Into<String>,
     cx: &App,
 ) -> impl IntoElement {
+    empty_block(icon, title_text, hint, px(8.), px(8.), cx)
+}
+
+pub fn empty_list(
+    icon: IconName,
+    title_text: impl Into<String>,
+    hint: impl Into<String>,
+    cx: &App,
+) -> impl IntoElement {
+    empty_block(icon, title_text, hint, px(20.), px(4.), cx)
+}
+
+fn empty_block(
+    icon: IconName,
+    title_text: impl Into<String>,
+    hint: impl Into<String>,
+    pad_y: gpui::Pixels,
+    icon_pad: gpui::Pixels,
+    cx: &App,
+) -> impl IntoElement {
     v_flex()
         .w_full()
         .items_center()
         .justify_center()
-        .gap_2()
-        .px_3()
-        .py_8()
+        .gap_1()
+        .px_4()
+        .py(pad_y)
         .child(
             div()
-                .size(px(40.))
-                .rounded_full()
-                .bg(cx.theme().muted)
+                .size(px(36.))
+                .rounded(px(10.))
+                .bg(cx.theme().secondary_active)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(Icon::new(icon).text_color(cx.theme().muted_foreground)),
+                .mb(icon_pad)
+                .child(
+                    Icon::new(icon)
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                ),
         )
         .child(
             div()
@@ -172,6 +210,7 @@ pub fn empty_panel(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .text_center()
                 .child(hint.into()),
         )
 }
@@ -206,6 +245,33 @@ pub fn default_cover(loader: Loader) -> &'static str {
     }
 }
 
+pub fn instance_cover(
+    cover: Option<&Path>,
+    loader: Loader,
+    size: f32,
+    cx: &App,
+) -> impl IntoElement {
+    let radius = px((size * 0.22).clamp(6.0, 12.0));
+    let image = match cover {
+        Some(path) => img(path.to_path_buf()),
+        None => img(default_cover(loader)),
+    };
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded(radius)
+        .overflow_hidden()
+        .border_1()
+        .border_color(cx.theme().border.opacity(0.55))
+        .bg(cx.theme().secondary_active)
+        .child(
+            image
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .rounded(radius),
+        )
+}
+
 pub fn section_label(text: impl Into<String>, cx: &App) -> impl IntoElement {
     div()
         .text_xs()
@@ -214,18 +280,31 @@ pub fn section_label(text: impl Into<String>, cx: &App) -> impl IntoElement {
         .child(text.into())
 }
 
-pub fn section_header(
-    text: impl Into<String>,
-    action: Option<AnyElement>,
-    cx: &App,
-) -> impl IntoElement {
+pub fn section_header(text: impl Into<String>, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
         .w_full()
         .items_center()
-        .justify_between()
         .gap_2()
         .child(section_label(text, cx))
-        .when_some(action, |this, action| this.child(action))
+        .when_some(count.filter(|&n| n > 0), |this, count| {
+            this.child(count_badge(count, cx))
+        })
+}
+
+fn count_badge(count: usize, cx: &App) -> impl IntoElement {
+    div()
+        .h(px(16.))
+        .min_w(px(18.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .bg(cx.theme().secondary_active)
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground)
+        .child(count.to_string())
 }
 
 pub fn chip(text: impl Into<String>, cx: &App) -> impl IntoElement {
@@ -235,10 +314,147 @@ pub fn chip(text: impl Into<String>, cx: &App) -> impl IntoElement {
         .flex()
         .items_center()
         .rounded(px(6.))
-        .bg(cx.theme().muted)
+        .bg(cx.theme().secondary_active)
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
+}
+
+pub fn running_pill(cx: &App) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .h(px(22.))
+        .rounded(px(6.))
+        .bg(cx.theme().success.opacity(0.16))
+        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().success)
+                .child("Running"),
+        )
+}
+
+pub fn list_frame(cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .rounded(px(10.))
+        .bg(cx.theme().muted)
+        .overflow_hidden()
+}
+
+pub fn list_row_corners<T: Styled>(this: T, first: bool, last: bool) -> T {
+    let radius = px(10.);
+    let none = px(0.);
+    this.rounded(none)
+        .rounded_tl(if first { radius } else { none })
+        .rounded_tr(if first { radius } else { none })
+        .rounded_bl(if last { radius } else { none })
+        .rounded_br(if last { radius } else { none })
+}
+
+pub fn card(cx: &App) -> impl ParentElement + Styled + IntoElement {
+    v_flex()
+        .w_full()
+        .gap_3()
+        .p_4()
+        .rounded(cx.theme().radius_lg)
+        .bg(cx.theme().muted)
+}
+
+pub fn row_rule(cx: &App) -> impl IntoElement {
+    div().h(px(1.)).w_full().bg(cx.theme().border.opacity(0.7))
+}
+
+pub fn segmented(id: impl Into<ElementId>, cx: &App) -> impl ParentElement + Styled + IntoElement {
+    h_flex()
+        .id(id)
+        .w_full()
+        .p(px(3.))
+        .gap_1()
+        .rounded(px(10.))
+        .bg(cx.theme().muted)
+}
+
+pub fn segment(
+    id: impl Into<ElementId>,
+    label: impl Into<String>,
+    icon: Option<IconName>,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    filled_segment(id, label, icon, active, true, on_click, cx)
+}
+
+pub fn filled_segment(
+    id: impl Into<ElementId>,
+    label: impl Into<String>,
+    icon: Option<IconName>,
+    active: bool,
+    filled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let (bg, fg) = if active {
+        (
+            if filled {
+                cx.theme().secondary_hover
+            } else {
+                cx.theme().transparent
+            },
+            cx.theme().foreground,
+        )
+    } else {
+        (cx.theme().transparent, cx.theme().muted_foreground)
+    };
+    h_flex()
+        .id(id)
+        .flex_1()
+        .h(px(28.))
+        .px_3()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded(px(8.))
+        .bg(bg)
+        .text_color(fg)
+        .cursor_pointer()
+        .when(!active, |this| {
+            this.hover(|this| this.text_color(cx.theme().foreground))
+        })
+        .on_click(on_click)
+        .when_some(icon, |this, icon| {
+            this.child(Icon::new(icon).text_sm().text_color(fg))
+        })
+        .child(
+            div()
+                .text_sm()
+                .font_weight(if active {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .child(label.into()),
+        )
+}
+
+pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
+    if is_busy_status(message) {
+        div()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(message.to_string())
+            .into_any_element()
+    } else {
+        Alert::error("status-error", message.to_string()).into_any_element()
+    }
+}
+
+pub fn is_busy_status(status: &str) -> bool {
+    status.ends_with('…') || status.ends_with("...")
 }
 
 pub fn loader_label(loader: Loader) -> &'static str {
@@ -253,7 +469,7 @@ pub fn loader_label(loader: Loader) -> &'static str {
 
 pub fn format_playtime(secs: u64) -> String {
     if secs == 0 {
-        return "No playtime".into();
+        return "No playtime yet".into();
     }
     let hours = secs / 3600;
     let minutes = (secs % 3600) / 60;
@@ -268,7 +484,7 @@ pub fn format_playtime(secs: u64) -> String {
 
 pub fn format_last_played(ms: Option<i64>) -> String {
     let Some(ms) = ms else {
-        return "Never played".into();
+        return "Never launched".into();
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

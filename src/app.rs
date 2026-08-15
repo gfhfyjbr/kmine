@@ -5,24 +5,26 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowOptions, div, px, size,
+    AnimationExt, App, Context, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowOptions, div, point, px, relative, size, transparent_black,
 };
 use gpui_component::{
-    ActiveTheme, Root,
+    ActiveTheme, IconName, Root,
     dialog::Cancel,
     h_flex,
     input::{InputEvent, InputState},
+    select::SelectEvent,
+    slider::SliderEvent,
     v_flex,
 };
 
-use crate::chrome::{chip, loader_label};
+use crate::chrome::{empty_panel, filled_segment, motion, status_alert};
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
     CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort, ContentClass, ContentEntry,
-    ContentFolder, Engine, EngineError, Event, InstanceId, InstancePatch, InstanceSummary, Loader,
+    ContentFolder, Engine, EngineError, Event, InstanceId, InstanceSummary, Loader,
     QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
@@ -31,7 +33,9 @@ use crate::modals::catalog::{self, CatalogModal, CatalogTarget};
 use crate::modals::confirm;
 use crate::modals::create_instance::{self, CreateInstanceForm};
 use crate::modals::progress::{self, EventProgressSink, ProgressModal};
+use crate::modals::settings;
 use crate::screens::{instance_content, instance_play, instance_settings, instances};
+use crate::smooth_scroll::SmoothScroll;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum InstancePane {
@@ -41,6 +45,12 @@ enum InstancePane {
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentAnim {
+    Instance,
+    Tab,
+}
+
 pub struct KmineApp {
     engine: Arc<Engine>,
     rt: tokio::runtime::Handle,
@@ -48,6 +58,7 @@ pub struct KmineApp {
     selected: Option<InstanceId>,
     show_create: bool,
     show_accounts: bool,
+    show_settings: bool,
     status: String,
     create: Option<CreateInstanceForm>,
     catalog: Option<CatalogModal>,
@@ -58,14 +69,23 @@ pub struct KmineApp {
     cancel: Option<CancellationToken>,
     rename: Option<instances::RenameForm>,
     instance_pane: InstancePane,
+    pane_from: InstancePane,
+    content_anim: ContentAnim,
     content_mods: Vec<ContentEntry>,
     content_resourcepacks: Vec<ContentEntry>,
     content_shaderpacks: Vec<ContentEntry>,
     quick_play: QuickPlayLists,
     settings: Option<instance_settings::SettingsForm>,
+    settings_saving: bool,
+    settings_dirty: bool,
     skin_face: Option<PathBuf>,
     skin_for: Option<AccountId>,
     pinned: HashSet<InstanceId>,
+    sidebar_scroll: SmoothScroll,
+    play_scroll: SmoothScroll,
+    content_scroll: SmoothScroll,
+    settings_scroll: SmoothScroll,
+    accounts_scroll: SmoothScroll,
 }
 
 impl KmineApp {
@@ -81,6 +101,7 @@ impl KmineApp {
             selected: None,
             show_create: false,
             show_accounts: false,
+            show_settings: false,
             status: String::new(),
             create: None,
             catalog: None,
@@ -91,14 +112,23 @@ impl KmineApp {
             cancel: None,
             rename: None,
             instance_pane: InstancePane::Play,
+            pane_from: InstancePane::Play,
+            content_anim: ContentAnim::Instance,
             content_mods: Vec::new(),
             content_resourcepacks: Vec::new(),
             content_shaderpacks: Vec::new(),
             quick_play: QuickPlayLists::default(),
             settings: None,
+            settings_saving: false,
+            settings_dirty: false,
             skin_face: None,
             skin_for: None,
             pinned: HashSet::new(),
+            sidebar_scroll: SmoothScroll::new(),
+            play_scroll: SmoothScroll::new(),
+            content_scroll: SmoothScroll::new(),
+            settings_scroll: SmoothScroll::new(),
+            accounts_scroll: SmoothScroll::new(),
         };
         this.listen_engine_events(cx);
         this.ensure_skin(cx);
@@ -158,18 +188,26 @@ impl KmineApp {
         self.instances.iter().find(|instance| instance.id == id)
     }
 
-    fn select_instance(&mut self, id: InstanceId, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_instance(&mut self, id: InstanceId, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected == Some(id) {
+            return;
+        }
+        self.pane_from = self.instance_pane;
+        self.instance_pane = InstancePane::Play;
+        self.content_anim = ContentAnim::Instance;
         self.selected = Some(id);
         self.reload_content();
         self.reload_quick_play();
-        if self.instance_pane == InstancePane::Settings {
-            self.load_settings(id, window, cx);
-        }
         cx.notify();
     }
 
     fn set_pane(&mut self, pane: InstancePane, window: &mut Window, cx: &mut Context<Self>) {
+        if pane == self.instance_pane {
+            return;
+        }
+        self.pane_from = self.instance_pane;
         self.instance_pane = pane;
+        self.content_anim = ContentAnim::Tab;
         match pane {
             InstancePane::Play => self.reload_quick_play(),
             InstancePane::Content => self.reload_content(),
@@ -220,6 +258,7 @@ impl KmineApp {
                     window,
                     cx,
                 ));
+                self.bind_settings(cx);
             }
             Ok(None) => {
                 self.settings = None;
@@ -229,22 +268,41 @@ impl KmineApp {
         }
     }
 
-    fn apply_patch(&mut self, id: InstanceId, patch: InstancePatch, cx: &mut Context<Self>) {
-        let engine = self.engine.clone();
-        let rt = self.rt.clone();
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = rt
-                .spawn(async move { engine.update_instance(id, patch).await })
-                .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(Ok(())) => this.status.clear(),
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
-                }
-                cx.notify();
-            })
-            .ok();
+    fn bind_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.settings.as_ref() else {
+            return;
+        };
+        let memory_min = form.memory_min.clone();
+        let memory_max = form.memory_max.clone();
+        let jvm_flags = form.jvm_flags.clone();
+        let java_path = form.java_path.clone();
+        let account = form.account.clone();
+        cx.subscribe(&memory_min, |this, _, event: &SliderEvent, cx| match event {
+            SliderEvent::Change(_) => cx.notify(),
+            SliderEvent::Release(_) => this.save_settings(cx),
+        })
+        .detach();
+        cx.subscribe(&memory_max, |this, _, event: &SliderEvent, cx| match event {
+            SliderEvent::Change(_) => cx.notify(),
+            SliderEvent::Release(_) => this.save_settings(cx),
+        })
+        .detach();
+        cx.subscribe(&jvm_flags, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change | InputEvent::Blur) {
+                this.save_settings(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&java_path, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change | InputEvent::Blur) {
+                this.save_settings(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&account, |this, _, event: &SelectEvent<Vec<String>>, cx| {
+            if matches!(event, SelectEvent::Confirm(_)) {
+                this.save_settings(cx);
+            }
         })
         .detach();
     }
@@ -253,9 +311,36 @@ impl KmineApp {
         let Some(form) = self.settings.as_ref() else {
             return;
         };
+        if self.settings_saving {
+            self.settings_dirty = true;
+            return;
+        }
         let id = form.instance_id;
         let patch = form.patch(cx);
-        self.apply_patch(id, patch, cx);
+        self.settings_saving = true;
+        self.settings_dirty = false;
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let result = rt
+                .spawn(async move { engine.update_instance(id, patch).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.settings_saving = false;
+                match result {
+                    Ok(Ok(())) => this.status.clear(),
+                    Ok(Err(err)) => this.status = err.to_string(),
+                    Err(err) => this.status = err.to_string(),
+                }
+                if this.settings_dirty {
+                    this.settings_dirty = false;
+                    this.save_settings(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_sandbox(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -263,15 +348,7 @@ impl KmineApp {
             return;
         };
         form.sandbox = enabled;
-        let id = form.instance_id;
-        self.apply_patch(
-            id,
-            InstancePatch {
-                sandbox: Some(enabled),
-                ..Default::default()
-            },
-            cx,
-        );
+        self.save_settings(cx);
     }
 
     fn toggle_content(&mut self, path: PathBuf, enabled: bool, cx: &mut Context<Self>) {
@@ -397,6 +474,7 @@ impl KmineApp {
             }
             Event::AuthRequired => {
                 self.refresh_accounts();
+                self.show_settings = false;
                 self.show_accounts = true;
             }
             Event::ProcessExited { .. } => {
@@ -413,6 +491,7 @@ impl KmineApp {
             return;
         }
         self.close_catalog(cx);
+        self.show_settings = false;
         self.close_accounts(cx);
         let form = CreateInstanceForm::new(window, cx);
         cx.subscribe(&form.name, |this, _, event: &InputEvent, cx| {
@@ -1107,6 +1186,7 @@ impl KmineApp {
         self.close_catalog(cx);
         self.show_create = false;
         self.create = None;
+        self.show_settings = false;
         self.refresh_accounts();
         self.show_accounts = true;
         cx.notify();
@@ -1115,6 +1195,20 @@ impl KmineApp {
     fn close_accounts(&mut self, cx: &mut Context<Self>) {
         self.show_accounts = false;
         self.engine.cancel_login();
+        cx.notify();
+    }
+
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.show_create = false;
+        self.create = None;
+        self.show_accounts = false;
+        self.engine.cancel_login();
+        self.show_settings = true;
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.show_settings = false;
         cx.notify();
     }
 
@@ -1446,6 +1540,7 @@ impl KmineApp {
                         match err {
                             EngineError::NoAccount => {
                                 this.refresh_accounts();
+                                this.show_settings = false;
                                 this.show_accounts = true;
                                 this.status = EngineError::NoAccount.to_string();
                             }
@@ -1480,18 +1575,41 @@ impl KmineApp {
     fn open_game_output(&self, id: InstanceId, name: String, cx: &mut Context<Self>) {
         let engine = self.engine.clone();
         let rt = self.rt.clone();
+        let glass = crate::sidebar_is_glass();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(860.), px(520.)), cx)),
+            window_background: crate::window_background(),
             titlebar: Some(TitlebarOptions {
                 title: Some(format!("{name} — output").into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: Some(point(px(16.), px(18.))),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let _ = cx.open_window(options, move |window, cx| {
-            let view = cx.new(|cx| crate::game_output::GameOutput::new(engine, rt, id, name, cx));
-            cx.new(|cx| Root::new(view, window, cx))
+        let engine_for_close = engine.clone();
+        let opened = cx.open_window(options, move |window, cx| {
+            let view = cx.new(|cx| {
+                crate::game_output::GameOutput::new(engine, rt, id, name, window, cx)
+            });
+            cx.new(|cx| {
+                let mut root = Root::new(view, window, cx);
+                if glass {
+                    root = root.bg(transparent_black());
+                }
+                root
+            })
         });
+        if let Ok(handle) = opened {
+            handle
+                .update(cx, |_, window, cx| {
+                    window.on_window_should_close(cx, move |_, _| {
+                        let _ = engine_for_close.kill(id);
+                        true
+                    });
+                })
+                .ok();
+        }
     }
 }
 
@@ -1508,7 +1626,10 @@ impl Render for KmineApp {
             .size_full()
             .relative()
             .when(
-                self.show_create || self.show_accounts || self.catalog.is_some(),
+                self.show_create
+                    || self.show_accounts
+                    || self.show_settings
+                    || self.catalog.is_some(),
                 |el| {
                     el.key_context("Modal").on_action({
                         let this = this.clone();
@@ -1520,6 +1641,8 @@ impl Render for KmineApp {
                                     this.close_create(cx);
                                 } else if this.show_accounts && !this.accounts.busy {
                                     this.close_accounts(cx);
+                                } else if this.show_settings {
+                                    this.close_settings(cx);
                                 }
                             })
                             .ok();
@@ -1592,8 +1715,15 @@ impl Render for KmineApp {
                                     this.update(cx, |this, cx| this.open_accounts(cx)).ok();
                                 }
                             },
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.open_settings(cx)).ok();
+                                }
+                            },
                             self.rename.as_ref(),
                             &self.pinned,
+                            &self.sidebar_scroll,
                             cx,
                         ))
                         .child(
@@ -1609,6 +1739,8 @@ impl Render for KmineApp {
                                     Some(instance) => right_pane(
                                         &instance,
                                         pane,
+                                        self.pane_from,
+                                        self.content_anim,
                                         &status,
                                         &self.content_mods,
                                         &self.content_resourcepacks,
@@ -1618,6 +1750,9 @@ impl Render for KmineApp {
                                         &sandbox_status,
                                         self.progress.as_ref().is_some_and(|p| p.id == instance.id),
                                         self.progress.is_none(),
+                                        &self.play_scroll,
+                                        &self.content_scroll,
+                                        &self.settings_scroll,
                                         this.clone(),
                                         cx,
                                     )
@@ -1770,6 +1905,27 @@ impl Render for KmineApp {
                     cx,
                 ))
             })
+            .when(self.show_settings, |el| {
+                el.child(settings::render(
+                    self.engine.library_dir(),
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, _| {
+                                settings::reveal_library(this.engine.library_dir());
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.close_settings(cx)).ok();
+                        }
+                    },
+                    cx,
+                ))
+            })
             .when(self.show_accounts, |el| {
                 el.child(accounts::render(
                     &self.accounts,
@@ -1801,6 +1957,7 @@ impl Render for KmineApp {
                             this.update(cx, |this, cx| this.close_accounts(cx)).ok();
                         }
                     },
+                    &self.accounts_scroll,
                     cx,
                 ))
             })
@@ -1813,6 +1970,8 @@ impl Render for KmineApp {
 fn right_pane(
     instance: &InstanceSummary,
     pane: InstancePane,
+    pane_from: InstancePane,
+    content_anim: ContentAnim,
     status: &str,
     mods: &[ContentEntry],
     resourcepacks: &[ContentEntry],
@@ -1822,6 +1981,9 @@ fn right_pane(
     sandbox_status: &SandboxStatus,
     preparing: bool,
     add_enabled: bool,
+    play_scroll: &SmoothScroll,
+    content_scroll: &SmoothScroll,
+    settings_scroll: &SmoothScroll,
     this: WeakEntity<KmineApp>,
     cx: &App,
 ) -> impl IntoElement {
@@ -1830,41 +1992,99 @@ fn right_pane(
         .size_full()
         .min_w_0()
         .pt(px(36.))
-        .px_8()
-        .pb_8()
+        .px_6()
+        .pb_6()
         .id("instance-main")
-        .overflow_y_scroll()
         .child(
             v_flex()
+                .id(SharedString::from(format!(
+                    "instance-shell-{}",
+                    instance.id.as_hyphenated()
+                )))
+                .size_full()
                 .w_full()
-                .gap_5()
-                .child(instance_header(instance, cx))
-                .child(pane_switcher(pane, this.clone(), cx))
+                .gap_4()
+                .with_animation(
+                    SharedString::from(format!("instance-in-{}", instance.id.as_hyphenated())),
+                    motion(),
+                    |this, delta| this.opacity(delta).mt(px(8. * (1. - delta))),
+                )
+                .child(pane_switcher(pane_from, pane, this.clone(), cx))
+                .child(instance_play::launch_hero(
+                    instance,
+                    preparing,
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.play_or_stop(id, None, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    cx,
+                ))
+                .child(tab_body(
+                    instance,
+                    pane,
+                    content_anim,
+                    status,
+                    mods,
+                    resourcepacks,
+                    shaderpacks,
+                    quick_play,
+                    settings,
+                    sandbox_status,
+                    preparing,
+                    add_enabled,
+                    play_scroll,
+                    content_scroll,
+                    settings_scroll,
+                    this.clone(),
+                    cx,
+                ))
+        )
+}
+
+fn tab_body(
+    instance: &InstanceSummary,
+    pane: InstancePane,
+    content_anim: ContentAnim,
+    status: &str,
+    mods: &[ContentEntry],
+    resourcepacks: &[ContentEntry],
+    shaderpacks: &[ContentEntry],
+    quick_play: &QuickPlayLists,
+    settings: Option<&instance_settings::SettingsForm>,
+    sandbox_status: &SandboxStatus,
+    preparing: bool,
+    add_enabled: bool,
+    play_scroll: &SmoothScroll,
+    content_scroll: &SmoothScroll,
+    settings_scroll: &SmoothScroll,
+    this: WeakEntity<KmineApp>,
+    cx: &App,
+) -> gpui::AnyElement {
+    let id = instance.id;
+    let body = v_flex()
+        .id(match pane {
+            InstancePane::Play => "instance-pane-play",
+            InstancePane::Content => "instance-pane-content",
+            InstancePane::Settings => "instance-pane-settings",
+        })
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .gap_4()
                 .when(
                     !status.is_empty() && pane != InstancePane::Settings,
-                    |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(status.to_string()),
-                        )
-                    },
+                    |this| this.child(status_alert(status, cx)),
                 )
                 .child(match pane {
                     InstancePane::Play => instance_play::play_tab(
                         instance,
                         quick_play,
                         preparing,
-                        {
-                            let this = this.clone();
-                            move |_, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.play_or_stop(id, None, cx);
-                                })
-                                .ok();
-                            }
-                        },
                         {
                             let this = this.clone();
                             move |target, _, _, cx| {
@@ -1874,208 +2094,226 @@ fn right_pane(
                                 .ok();
                             }
                         },
+                        play_scroll,
                         cx,
                     )
                     .into_any_element(),
-                    InstancePane::Content => instance_content::content_tab(
-                        mods,
-                        resourcepacks,
-                        shaderpacks,
-                        instance.loader,
-                        add_enabled,
-                        {
-                            let this = this.clone();
-                            move |path, enabled, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.toggle_content(path, enabled, cx);
-                                })
-                                .ok();
-                            }
-                        },
-                        {
-                            let this = this.clone();
-                            move |path, _, window, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.confirm_delete_content(path, window, cx);
-                                })
-                                .ok();
-                            }
-                        },
-                        {
-                            let this = this.clone();
-                            move |class, _, window, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.open_content_catalog(class, window, cx);
-                                })
-                                .ok();
-                            }
-                        },
-                        cx,
-                    )
-                    .into_any_element(),
-                    InstancePane::Settings => match settings {
-                        Some(form) => instance_settings::settings_tab(
-                            form,
-                            sandbox_status,
-                            status,
+                    InstancePane::Content => content_scroll
+                        .vertical(
+                            v_flex()
+                                .id("instance-content-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .w_full(),
+                        )
+                        .child(instance_content::content_tab(
+                            mods,
+                            resourcepacks,
+                            shaderpacks,
+                            instance.loader,
+                            add_enabled,
                             {
                                 let this = this.clone();
-                                move |enabled, _, cx| {
+                                move |path, enabled, _, cx| {
                                     this.update(cx, |this, cx| {
-                                        this.set_sandbox(enabled, cx);
+                                        this.toggle_content(path, enabled, cx);
                                     })
                                     .ok();
                                 }
                             },
                             {
                                 let this = this.clone();
-                                move |_, _, cx| {
+                                move |path, _, window, cx| {
                                     this.update(cx, |this, cx| {
-                                        this.save_settings(cx);
+                                        this.confirm_delete_content(path, window, cx);
+                                    })
+                                    .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
+                                move |class, _, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.open_content_catalog(class, window, cx);
                                     })
                                     .ok();
                                 }
                             },
                             cx,
-                        )
+                        ))
                         .into_any_element(),
-                        None => div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Loading settings…")
+                    InstancePane::Settings => settings_scroll
+                        .vertical(
+                            v_flex()
+                                .id("instance-settings-scroll")
+                                .flex_1()
+                                .min_h_0()
+                                .w_full(),
+                        )
+                        .child(match settings {
+                            Some(form) => instance_settings::settings_tab(
+                                form,
+                                sandbox_status,
+                                status,
+                                {
+                                    let this = this.clone();
+                                    move |enabled, _, cx| {
+                                        this.update(cx, |this, cx| {
+                                            this.set_sandbox(enabled, cx);
+                                        })
+                                        .ok();
+                                    }
+                                },
+                                cx,
+                            )
                             .into_any_element(),
-                    },
-                }),
+                            None => div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Loading settings…")
+                                .into_any_element(),
+                        })
+                        .into_any_element(),
+                });
+    if content_anim == ContentAnim::Tab {
+        body.with_animation(
+            match pane {
+                InstancePane::Play => "tab-in-play",
+                InstancePane::Content => "tab-in-content",
+                InstancePane::Settings => "tab-in-settings",
+            },
+            motion(),
+            |this, delta| this.opacity(delta).mt(px(8. * (1. - delta))),
         )
+        .into_any_element()
+    } else {
+        body.into_any_element()
+    }
 }
 
-fn instance_header(instance: &InstanceSummary, cx: &App) -> impl IntoElement {
-    v_flex()
-        .w_full()
-        .gap_2()
-        .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_xl()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_ellipsis()
-                        .child(instance.name.clone()),
-                )
-                .when(instance.running, |this| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .h(px(22.))
-                            .rounded(px(6.))
-                            .bg(cx.theme().success.opacity(0.18))
-                            .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().success)
-                                    .child("Running"),
-                            ),
-                    )
-                }),
-        )
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(chip(instance.minecraft_version.clone(), cx))
-                .child(chip(loader_label(instance.loader), cx)),
-        )
+fn pane_slot(pane: InstancePane) -> f32 {
+    match pane {
+        InstancePane::Play => 0.0,
+        InstancePane::Content => 1.0 / 3.0,
+        InstancePane::Settings => 2.0 / 3.0,
+    }
 }
 
-fn pane_switcher(pane: InstancePane, this: WeakEntity<KmineApp>, cx: &App) -> impl IntoElement {
+fn pane_switcher(
+    from: InstancePane,
+    pane: InstancePane,
+    this: WeakEntity<KmineApp>,
+    cx: &App,
+) -> impl IntoElement {
+    let start = pane_slot(from);
+    let end = pane_slot(pane);
     h_flex()
         .id("instance-pane-switcher")
+        .relative()
+        .w_full()
         .flex_shrink_0()
-        .gap_1()
         .p(px(3.))
         .rounded(px(10.))
         .bg(cx.theme().muted)
-        .child(pane_tab(
-            "pane-play",
-            "Play",
-            pane == InstancePane::Play,
-            {
-                let this = this.clone();
-                move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.set_pane(InstancePane::Play, window, cx);
-                    })
-                    .ok();
-                }
-            },
-            cx,
-        ))
-        .child(pane_tab(
-            "pane-content",
-            "Content",
-            pane == InstancePane::Content,
-            {
-                let this = this.clone();
-                move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.set_pane(InstancePane::Content, window, cx);
-                    })
-                    .ok();
-                }
-            },
-            cx,
-        ))
-        .child(pane_tab(
-            "pane-settings",
-            "Settings",
-            pane == InstancePane::Settings,
-            {
-                let this = this.clone();
-                move |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.set_pane(InstancePane::Settings, window, cx);
-                    })
-                    .ok();
-                }
-            },
-            cx,
-        ))
+        .child(
+            div()
+                .absolute()
+                .top(px(3.))
+                .right(px(3.))
+                .bottom(px(3.))
+                .left(px(3.))
+                .child(pane_thumb(from, pane, start, end, cx)),
+        )
+        .children([
+            filled_segment(
+                "pane-play",
+                "Play",
+                None,
+                pane == InstancePane::Play,
+                false,
+                {
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.set_pane(InstancePane::Play, window, cx);
+                        })
+                        .ok();
+                    }
+                },
+                cx,
+            )
+            .into_any_element(),
+            filled_segment(
+                "pane-content",
+                "Content",
+                None,
+                pane == InstancePane::Content,
+                false,
+                {
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.set_pane(InstancePane::Content, window, cx);
+                        })
+                        .ok();
+                    }
+                },
+                cx,
+            )
+            .into_any_element(),
+            filled_segment(
+                "pane-settings",
+                "Settings",
+                None,
+                pane == InstancePane::Settings,
+                false,
+                {
+                    let this = this.clone();
+                    move |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.set_pane(InstancePane::Settings, window, cx);
+                        })
+                        .ok();
+                    }
+                },
+                cx,
+            )
+            .into_any_element(),
+        ])
 }
 
-fn pane_tab(
-    id: &'static str,
-    label: &'static str,
-    active: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+fn pane_thumb(
+    from: InstancePane,
+    pane: InstancePane,
+    start: f32,
+    end: f32,
     cx: &App,
 ) -> impl IntoElement {
-    let (bg, fg) = if active {
-        (cx.theme().primary, cx.theme().primary_foreground)
-    } else {
-        (cx.theme().transparent, cx.theme().muted_foreground)
-    };
-    h_flex()
-        .id(id)
-        .h(px(28.))
-        .px_3()
-        .items_center()
+    let pill = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(relative(1.0 / 3.0))
         .rounded(px(8.))
-        .bg(bg)
-        .text_color(fg)
-        .cursor_pointer()
-        .when(!active, |this| {
-            this.hover(|this| this.text_color(cx.theme().foreground))
-        })
-        .on_click(on_click)
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        .bg(cx.theme().secondary_hover);
+    if from == pane {
+        return pill.left(relative(end)).into_any_element();
+    }
+    pill.id("instance-pane-thumb")
+        .with_animation(
+            match (from, pane) {
+                (InstancePane::Play, InstancePane::Content) => "thumb-play-content",
+                (InstancePane::Play, InstancePane::Settings) => "thumb-play-settings",
+                (InstancePane::Content, InstancePane::Play) => "thumb-content-play",
+                (InstancePane::Content, InstancePane::Settings) => "thumb-content-settings",
+                (InstancePane::Settings, InstancePane::Play) => "thumb-settings-play",
+                (InstancePane::Settings, InstancePane::Content) => "thumb-settings-content",
+                _ => "thumb-idle",
+            },
+            motion(),
+            move |this, delta| this.left(relative(start + (end - start) * delta)),
+        )
+        .into_any_element()
 }
 
 enum InstallOutcome {
@@ -2096,29 +2334,21 @@ fn empty_state(
     on_create: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
-    use gpui_component::button::{Button, ButtonVariants};
-
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .child(
-            div()
-                .text_lg()
-                .font_weight(FontWeight::MEDIUM)
-                .child("No instance selected"),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Create one to download, launch, and keep local mods."),
-        )
-        .child(
-            Button::new("empty-create")
-                .primary()
-                .label("New instance")
-                .on_click(on_create),
-        )
+    v_flex().size_full().items_center().justify_center().child(
+        v_flex()
+            .w(px(320.))
+            .items_center()
+            .gap_2()
+            .child(empty_panel(
+                IconName::Plus,
+                "Pick an instance",
+                "Or create one to download the game, launch, and keep local mods.",
+                cx,
+            ))
+            .child(
+                crate::chrome::cta("empty-create")
+                    .label("New instance")
+                    .on_click(on_create),
+            ),
+    )
 }

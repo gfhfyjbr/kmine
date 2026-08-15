@@ -1,13 +1,6 @@
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
-use gpui_component::{
-    ActiveTheme, Sizable,
-    button::Button,
-    h_flex,
-    progress::{Progress, ProgressCircle},
-    spinner::Spinner,
-    v_flex,
-};
+use gpui::{div, px, App, ClickEvent, FontWeight, IntoElement, ParentElement, Styled, Window};
+use gpui_component::{button::Button, h_flex, progress::Progress, v_flex, ActiveTheme, Sizable};
 use kmine_engine::{Event, InstanceId, ProgressSink};
 
 pub struct ProgressModal {
@@ -79,37 +72,35 @@ pub fn render(
                 .border_1()
                 .border_color(cx.theme().border)
                 .shadow_lg()
-                .child(if indeterminate {
-                    div()
-                        .size(px(36.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(Spinner::new().color(cx.theme().foreground))
-                        .into_any_element()
-                } else {
-                    ProgressCircle::new("prepare-circle")
-                        .value(value)
-                        .small()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(percent),
-                        )
-                        .into_any_element()
-                })
                 .child(
                     v_flex()
                         .min_w_0()
                         .flex_1()
                         .gap_1()
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_ellipsis()
-                                .child(format!("Preparing {}", modal.name)),
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_ellipsis()
+                                        .child(format!("Preparing {}", modal.name)),
+                                )
+                                .when(!percent.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(percent),
+                                    )
+                                }),
                         )
                         .child(
                             Progress::new("prepare-progress")

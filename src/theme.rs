@@ -1,8 +1,8 @@
 use gpui::{App, px, rgb};
 use gpui_component::{Theme, ThemeTokens};
 
-/// Warm charcoal launcher palette. Surfaces lift in small steps; one light
-/// primary for Play. Running state uses moss, not neon.
+/// Warm charcoal launcher palette. Surfaces lift in small steps. Primary
+/// actions are a white pill. Running state uses moss, not neon.
 pub fn apply_launcher_colors(cx: &mut App) {
     let theme = Theme::global_mut(cx);
 
@@ -13,8 +13,8 @@ pub fn apply_launcher_colors(cx: &mut App) {
     let surface_active = rgb(0x211f1c).into();
     let border = rgb(0x33312c).into();
     let fg = rgb(0xeceae4).into();
-    let muted_fg = rgb(0x8c8980).into();
-    let white = rgb(0xf3f1ea).into();
+    let muted_fg = rgb(0x9a968c).into();
+    let white = rgb(0xf4f3ef).into();
     let ink = rgb(0x161512).into();
     let moss = rgb(0x6f8f6a).into();
     let moss_fg = rgb(0x121411).into();
@@ -64,11 +64,11 @@ pub fn apply_launcher_colors(cx: &mut App) {
 
     theme.primary = white;
     theme.primary_hover = rgb(0xffffff).into();
-    theme.primary_active = rgb(0xd8d5cc).into();
+    theme.primary_active = rgb(0xdddcd6).into();
     theme.primary_foreground = ink;
     theme.button_primary = white;
     theme.button_primary_hover = rgb(0xffffff).into();
-    theme.button_primary_active = rgb(0xd8d5cc).into();
+    theme.button_primary_active = rgb(0xdddcd6).into();
     theme.button_primary_foreground = ink;
     theme.sidebar_primary = white;
     theme.sidebar_primary_foreground = ink;

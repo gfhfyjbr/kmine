@@ -2,17 +2,20 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, FontWeight, IntoElement, ParentElement, Render, SharedString, Styled, WeakEntity,
-    Window, div, px,
+    App, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, Styled, WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable,
     button::{Button, ButtonVariants},
+    dialog::Cancel,
     h_flex, v_flex,
 };
 use kmine_engine::{CancellationToken, Engine, EngineError, Event, InstanceId, LogStream};
 
+use crate::chrome::{cta, running_pill};
 use crate::modals::progress::EventProgressSink;
+use crate::smooth_scroll::SmoothScroll;
 
 const MAX_LINES: usize = 4000;
 
@@ -25,6 +28,8 @@ pub struct GameOutput {
     running: bool,
     preparing: bool,
     prepare_status: String,
+    scroll: SmoothScroll,
+    focus: FocusHandle,
 }
 
 struct LogLine {
@@ -49,6 +54,7 @@ impl GameOutput {
         rt: tokio::runtime::Handle,
         instance_id: InstanceId,
         name: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let running = engine
@@ -57,6 +63,8 @@ impl GameOutput {
             .into_iter()
             .flatten()
             .any(|instance| instance.id == instance_id && instance.running);
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
         let this = Self {
             engine,
             rt,
@@ -66,6 +74,8 @@ impl GameOutput {
             running,
             preparing: false,
             prepare_status: String::new(),
+            scroll: SmoothScroll::new(),
+            focus,
         };
         this.listen(cx);
         this
@@ -245,69 +255,79 @@ impl Render for GameOutput {
                 self.prepare_status.clone()
             }
         } else if self.running {
-            "Running".into()
+            String::new()
         } else {
             "Stopped".into()
         };
         let status_color = if self.preparing {
             cx.theme().warning
-        } else if self.running {
-            cx.theme().success
         } else {
             cx.theme().muted_foreground
         };
 
+        let glass = crate::sidebar_is_glass();
         v_flex()
+            .key_context("GameOutput")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Cancel, window, _| {
+                if !this.running && !this.preparing {
+                    window.remove_window();
+                }
+            }))
             .size_full()
-            .p_3()
-            .bg(cx.theme().sidebar)
+            .when(!glass, |this| this.bg(cx.theme().background))
             .text_color(cx.theme().foreground)
             .child(
-                v_flex()
-                    .size_full()
-                    .rounded(px(16.))
-                    .bg(cx.theme().background)
-                    .border_1()
+                h_flex()
+                    .w_full()
+                    .h(if glass { px(52.) } else { px(40.) })
+                    .pl(if glass { px(92.) } else { px(12.) })
+                    .pr_3()
+                    .gap_3()
+                    .items_center()
+                    .flex_shrink_0()
+                    .when(!glass, |this| this.bg(cx.theme().background))
+                    .border_b_1()
                     .border_color(cx.theme().border)
-                    .overflow_hidden()
                     .child(
                         h_flex()
-                            .w_full()
-                            .px_4()
-                            .py_3()
-                            .gap_3()
+                            .min_w_0()
+                            .flex_1()
                             .items_center()
-                            .justify_between()
-                            .flex_shrink_0()
+                            .gap_2()
                             .child(
-                                v_flex()
+                                div()
                                     .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(self.name.clone()),
-                                    )
-                                    .child(div().text_sm().text_color(status_color).child(status)),
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_ellipsis()
+                                    .child(self.name.clone()),
                             )
-                            .child(header_action(self, cx)),
+                            .child(if self.running {
+                                running_pill(cx).into_any_element()
+                            } else {
+                                div()
+                                    .text_sm()
+                                    .text_color(status_color)
+                                    .child(status)
+                                    .into_any_element()
+                            }),
                     )
-                    .child(
+                    .child(header_action(self, cx)),
+            )
+            .child(
+                self.scroll
+                    .vertical(
                         v_flex()
                             .id("game-output-lines")
                             .flex_1()
                             .min_h_0()
-                            .m_3()
-                            .mt_0()
-                            .p_3()
+                            .p_4()
                             .gap_1()
-                            .rounded(cx.theme().radius_lg)
                             .bg(cx.theme().secondary)
-                            .font_family(SharedString::from("Menlo"))
-                            .overflow_y_scroll()
-                            .children(self.lines.iter().map(|line| render_line(line, cx))),
-                    ),
+                            .font_family(SharedString::from("Menlo")),
+                    )
+                    .children(self.lines.iter().map(|line| render_line(line, cx))),
             )
     }
 }
@@ -315,6 +335,7 @@ impl Render for GameOutput {
 fn header_action(this: &GameOutput, cx: &mut Context<GameOutput>) -> impl IntoElement {
     if this.preparing {
         return Button::new("output-starting")
+            .compact()
             .label("Starting…")
             .disabled(true)
             .into_any_element();
@@ -323,16 +344,17 @@ fn header_action(this: &GameOutput, cx: &mut Context<GameOutput>) -> impl IntoEl
         let entity = cx.weak_entity();
         return Button::new("output-kill")
             .danger()
-            .label("Kill instance")
+            .compact()
+            .label("Kill")
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.kill_instance(cx)).ok();
             })
             .into_any_element();
     }
     let entity = cx.weak_entity();
-    Button::new("output-start")
-        .primary()
-        .label("Start instance")
+    cta("output-start")
+        .compact()
+        .label("Start")
         .on_click(move |_, _, cx| {
             entity.update(cx, |this, cx| this.start_instance(cx)).ok();
         })

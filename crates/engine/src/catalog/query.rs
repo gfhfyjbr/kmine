@@ -3,8 +3,8 @@ use super::types::{
     CatalogCategory, CatalogFile, CatalogFileFilter, CatalogPage, CatalogProject,
     CatalogProjectDetail, CatalogProjectId, CatalogQuery, ContentClass,
 };
-use crate::error::EngineError;
 use crate::Engine;
+use crate::error::EngineError;
 use std::sync::Arc;
 
 impl Engine {
@@ -70,8 +70,8 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::catalog::types::{
-        CatalogBlob, CatalogCredentials, CatalogError, CatalogResource, CatalogSort, PackManifestSpec,
-        PackOverride,
+        CatalogBlob, CatalogCredentials, CatalogError, CatalogResource, CatalogSort,
+        PackManifestSpec, PackOverride,
     };
     use crate::ids::Loader;
     use crate::paths::LauncherPaths;
@@ -138,11 +138,7 @@ mod tests {
                 id: "-".into(),
             })
         }
-        async fn file(
-            &self,
-            _: &CatalogProjectId,
-            _: &str,
-        ) -> Result<CatalogFile, CatalogError> {
+        async fn file(&self, _: &CatalogProjectId, _: &str) -> Result<CatalogFile, CatalogError> {
             Err(CatalogError::NotFound {
                 kind: CatalogResource::Project,
                 id: "-".into(),

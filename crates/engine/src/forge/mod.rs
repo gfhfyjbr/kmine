@@ -63,10 +63,15 @@ pub fn pick_forge_version(
     versions: &[String],
     preferred: Option<&str>,
 ) -> Result<String, EngineError> {
-    if let Some(preferred) = preferred {
-        return Ok(preferred.to_string());
-    }
     let prefix = format!("{mc}-");
+    if let Some(preferred) = preferred {
+        // Maven ids are `{mc}-{build}` (e.g. 1.20.1-47.4.0). Pack manifests and
+        // the create form often store just `{build}` (47.4.0).
+        if preferred.starts_with(&prefix) || versions.iter().any(|v| v == preferred) {
+            return Ok(preferred.to_string());
+        }
+        return Ok(format!("{prefix}{preferred}"));
+    }
     versions
         .iter()
         .filter(|version| version.starts_with(&prefix))
@@ -458,6 +463,23 @@ mod tests {
     }
 
     #[test]
+    fn pack_pin_without_mc_prefix_resolves_to_maven_id() {
+        let vs = vec![
+            "1.20.1-47.1.0".into(),
+            "1.20.1-47.4.0".into(),
+            "1.19.4-45.0.0".into(),
+        ];
+        assert_eq!(
+            pick_forge_version("1.20.1", &vs, Some("47.4.0")).unwrap(),
+            "1.20.1-47.4.0"
+        );
+        assert_eq!(
+            pick_forge_version("1.20.1", &vs, Some("1.20.1-47.1.0")).unwrap(),
+            "1.20.1-47.1.0"
+        );
+    }
+
+    #[test]
     fn merge_forge_overrides_main_class() {
         let merged = merge_forge(
             load_version("version_1_21.json"),
@@ -467,6 +489,22 @@ mod tests {
             merged.main_class,
             "cpw.mods.bootstraplauncher.BootstrapLauncher"
         );
+    }
+
+    #[test]
+    fn processor_extract_dir_is_per_installer() {
+        let paths = LauncherPaths::new(std::path::PathBuf::from("/tmp/kmine-forge-extract"));
+        let a = processors::processor_extract_dir(
+            &paths,
+            Path::new("/libs/forge-1.20.1-47.4.0-installer.jar"),
+        );
+        let b = processors::processor_extract_dir(
+            &paths,
+            Path::new("/libs/forge-1.21.1-52.1.16-installer.jar"),
+        );
+        assert_ne!(a, b);
+        assert!(a.ends_with("forge-extract/forge-1.20.1-47.4.0-installer"));
+        assert!(b.ends_with("forge-extract/forge-1.21.1-52.1.16-installer"));
     }
 
     #[test]

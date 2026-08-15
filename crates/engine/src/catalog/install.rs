@@ -1,13 +1,19 @@
 use super::cache;
 use super::provider::{CatalogProvider, ProviderId};
-use super::types::{CatalogBlob, CatalogError, CatalogFile, CatalogProjectId, ContentClass};
+use super::types::{
+    CatalogBlob, CatalogError, CatalogFile, CatalogProjectId, ContentClass, PackManifestFileSpec,
+};
 use crate::error::EngineError;
-use crate::http::HttpFiles;
+use crate::http::{self, HttpFiles};
 use crate::ids::{InstanceId, Loader};
 use crate::paths::{self, LauncherPaths};
 use crate::types::{ContentFolder, CreateInstance, ProgressSink};
 use crate::{Engine, Event};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// Engine-wide install flag. The parking_lot guard is not held across `.await`
@@ -156,25 +162,22 @@ impl Engine {
                 .ok_or_else(|| crate::instance_not_found(&self.paths))?;
             let mc = self.paths.instance_minecraft(&row.slug);
 
-            let required: Vec<_> = manifest.files.iter().filter(|f| f.required).collect();
-            let n = required.len();
-            for (idx, spec) in required.iter().enumerate() {
-                check_cancel(cancel)?;
-                let i = idx + 1;
-                progress.set(&format!("Files {i}/{n}"), i as u64, n as u64);
-                let Some(folder) = spec.class.dest_folder() else {
-                    return Err(CatalogError::Message(format!(
-                        "required pack file {} has no dest folder",
-                        spec.file_id
-                    ))
-                    .into());
-                };
-                let file = catalog.file(&spec.project_id, &spec.file_id).await?;
-                let (cached, blob) =
-                    fetch_blob(&*catalog, &self.paths, provider, &file, cancel).await?;
-                check_cancel(cancel)?;
-                copy_cached_file(&mc, folder, &blob.file_name, &cached)?;
-            }
+            let required: Vec<_> = manifest
+                .files
+                .iter()
+                .filter(|f| f.required)
+                .cloned()
+                .collect();
+            fetch_and_copy_pack_files(
+                catalog.clone(),
+                &self.paths,
+                provider,
+                &mc,
+                &required,
+                progress,
+                cancel,
+            )
+            .await?;
 
             check_cancel(cancel)?;
             write_overrides(&*catalog, &pack_blob.bytes, &mc, progress, cancel)?;
@@ -271,6 +274,92 @@ fn prefer_cancelled(err: EngineError, cancel: &CancellationToken) -> EngineError
     } else {
         err
     }
+}
+
+async fn fetch_and_copy_pack_files(
+    catalog: Arc<dyn CatalogProvider>,
+    paths: &LauncherPaths,
+    provider: ProviderId,
+    instance_minecraft: &Path,
+    required: &[PackManifestFileSpec],
+    progress: &dyn ProgressSink,
+    cancel: &CancellationToken,
+) -> Result<(), EngineError> {
+    let n = required.len() as u64;
+    if n == 0 {
+        progress.set("Files 0/0", 0, 0);
+        return Ok(());
+    }
+    progress.set(&format!("Files 0/{n}"), 0, n);
+
+    let jobs: Vec<(ContentFolder, CatalogProjectId, String)> = required
+        .iter()
+        .map(|spec| {
+            let folder = spec.class.dest_folder().ok_or_else(|| {
+                CatalogError::Message(format!(
+                    "required pack file {} has no dest folder",
+                    spec.file_id
+                ))
+            })?;
+            Ok((folder, spec.project_id.clone(), spec.file_id.clone()))
+        })
+        .collect::<Result<_, CatalogError>>()?;
+
+    let limit = http::download_concurrency().clamp(1, 32);
+    let sem = Arc::new(Semaphore::new(limit));
+    let mut set = JoinSet::new();
+    for (folder, project_id, file_id) in jobs {
+        check_cancel(cancel)?;
+        let catalog = catalog.clone();
+        let paths = paths.clone();
+        let cancel = cancel.clone();
+        let sem = sem.clone();
+        set.spawn(async move {
+            let _permit = tokio::select! {
+                _ = cancel.cancelled() => return Err(EngineError::Cancelled),
+                result = sem.acquire_owned() => result.map_err(|err| {
+                    EngineError::io(
+                        PathBuf::from("catalog-download"),
+                        std::io::Error::other(err.to_string()),
+                    )
+                })?,
+            };
+            let file = catalog.file(&project_id, &file_id).await?;
+            let (cached, blob) = fetch_blob(&*catalog, &paths, provider, &file, &cancel).await?;
+            Ok((folder, blob.file_name, cached))
+        });
+    }
+
+    let done = AtomicU64::new(0);
+    while let Some(joined) = set.join_next().await {
+        if cancel.is_cancelled() {
+            set.abort_all();
+            return Err(EngineError::Cancelled);
+        }
+        match joined {
+            Ok(Ok((folder, file_name, cached))) => {
+                copy_cached_file(instance_minecraft, folder, &file_name, &cached)?;
+                let i = done.fetch_add(1, Ordering::Relaxed) + 1;
+                progress.set(&format!("Files {i}/{n}"), i, n);
+            }
+            Ok(Err(err)) => {
+                set.abort_all();
+                return Err(err);
+            }
+            Err(join_err) if join_err.is_cancelled() => {
+                set.abort_all();
+                return Err(EngineError::Cancelled);
+            }
+            Err(join_err) => {
+                set.abort_all();
+                return Err(EngineError::io(
+                    PathBuf::from("catalog-download"),
+                    std::io::Error::other(join_err.to_string()),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn fetch_blob(

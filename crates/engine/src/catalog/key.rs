@@ -1,8 +1,8 @@
 use super::provider::ProviderId;
 use super::types::{CatalogCredentials, CatalogError};
+use crate::Engine;
 use crate::error::EngineError;
 use crate::http::HttpFiles;
-use crate::Engine;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,20 +81,18 @@ impl Engine {
                 let Some(provider) = provider else {
                     continue;
                 };
-                let _ = refresh_catalog_key(
-                    &store,
-                    &master_key,
-                    &url,
-                    token.as_deref(),
-                    &provider,
-                )
-                .await;
+                let _ = refresh_catalog_key(&store, &master_key, &url, token.as_deref(), &provider)
+                    .await;
             }
         });
     }
 
     fn read_catalog_secret_api_key(&self) -> Option<String> {
-        let raw = self.store.lock().get_secret(&self.master_key, SECRET_ID).ok()??;
+        let raw = self
+            .store
+            .lock()
+            .get_secret(&self.master_key, SECRET_ID)
+            .ok()??;
         parse_secret_api_key(&raw)
     }
 }
@@ -161,9 +159,7 @@ async fn refresh_catalog_key(
         )
     })?;
 
-    store
-        .lock()
-        .put_secret(master_key, SECRET_ID, &plaintext)?;
+    store.lock().put_secret(master_key, SECRET_ID, &plaintext)?;
     provider.set_credentials(CatalogCredentials::ApiKey(parsed.api_key));
     Ok(())
 }
@@ -212,8 +208,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const FIXTURE_KEY: &str =
-        "$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm";
+    const FIXTURE_KEY: &str = "$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm";
 
     #[derive(Default)]
     struct CredFake {
@@ -268,11 +263,7 @@ mod tests {
                 id: "-".into(),
             })
         }
-        async fn file(
-            &self,
-            _: &CatalogProjectId,
-            _: &str,
-        ) -> Result<CatalogFile, CatalogError> {
+        async fn file(&self, _: &CatalogProjectId, _: &str) -> Result<CatalogFile, CatalogError> {
             Err(CatalogError::NotFound {
                 kind: CatalogResource::Project,
                 id: "-".into(),
@@ -415,8 +406,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/get_cf_api_key"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(format!(r#"not-json {FIXTURE_KEY}"#)),
+                ResponseTemplate::new(200).set_body_string(format!(r#"not-json {FIXTURE_KEY}"#)),
             )
             .mount(&server)
             .await;

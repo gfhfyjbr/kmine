@@ -1,20 +1,20 @@
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, div, img, px, rgba,
+    div, img, px, rgb, rgba, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputState},
-    v_flex,
+    v_flex, ActiveTheme, Icon, IconName, Sizable,
 };
 use kmine_engine::{InstanceId, InstanceSummary};
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::chrome::{loader_icon, loader_label, loader_tint};
+use crate::chrome::{instance_cover, loader_label};
+use crate::smooth_scroll::SmoothScroll;
 
 pub struct RenameForm {
     pub id: InstanceId,
@@ -33,8 +33,10 @@ pub fn sidebar(
     on_delete: impl Fn(InstanceId, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_pin: impl Fn(InstanceId, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_accounts: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     renaming: Option<&RenameForm>,
     pinned: &HashSet<InstanceId>,
+    scroll: &SmoothScroll,
     cx: &App,
 ) -> impl IntoElement {
     let mut rows: Vec<&InstanceSummary> = instances.iter().collect();
@@ -64,27 +66,33 @@ pub fn sidebar(
                 .child(
                     Button::new("sidebar-create")
                         .ghost()
-                        .compact()
                         .icon(IconName::Plus)
+                        .with_size(px(28.))
+                        .rounded(px(8.))
                         .tooltip("New instance")
                         .on_click(on_create.clone()),
                 ),
         )
         .child(
-            v_flex()
-                .id("instance-list")
-                .flex_1()
-                .px_2()
-                .gap_1()
-                .overflow_y_scroll()
+            scroll
+                .vertical(v_flex().id("instance-list").flex_1().px_2().gap_1())
                 .when(rows.is_empty(), |this| {
                     this.child(
                         div()
                             .px_3()
                             .py_6()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("No instances yet"),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("No instances"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Create one to get started"),
+                            ),
                     )
                 })
                 .children(rows.into_iter().map(|instance| {
@@ -122,25 +130,20 @@ pub fn sidebar(
                     )
                 })),
         )
-        .child(
-            v_flex()
-                .px_2()
-                .pb_2()
-                .pt_1()
-                .border_t_1()
-                .border_color(if glass {
-                    rgba(0xffffff1a).into()
-                } else {
-                    cx.theme().border
-                })
-                .child(identity_row(identity, skin, on_accounts, cx)),
-        )
+        .child(identity_footer(
+            identity,
+            skin,
+            on_accounts,
+            on_settings,
+            cx,
+        ))
 }
 
-fn identity_row(
+fn identity_footer(
     identity: &str,
     skin: Option<&Path>,
     on_accounts: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let signed_in = identity != "Not signed in";
@@ -149,54 +152,60 @@ fn identity_row(
     } else {
         "Add an account"
     };
+    let glass = crate::sidebar_is_glass();
     h_flex()
         .id("accounts-identity")
         .w_full()
-        .px_2()
+        .px_3()
         .py_2()
         .items_center()
-        .justify_between()
         .gap_2()
-        .rounded(px(10.))
+        .border_t_1()
+        .border_color(if glass {
+            rgba(0xffffff1a).into()
+        } else {
+            cx.theme().border
+        })
         .cursor_pointer()
         .hover(|this| {
-            this.bg(if crate::sidebar_is_glass() {
+            this.bg(if glass {
                 rgba(0xffffff18).into()
             } else {
                 cx.theme().muted
             })
         })
         .on_click(on_accounts)
+        .child(player_face(skin, cx))
         .child(
-            h_flex()
+            v_flex()
                 .min_w_0()
-                .items_center()
-                .gap_2()
-                .child(player_face(skin, cx))
+                .flex_1()
                 .child(
-                    v_flex()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .id("accounts-nick")
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_ellipsis()
-                                .child(identity.to_string()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .text_ellipsis()
-                                .child(subtitle),
-                        ),
+                    div()
+                        .id("accounts-nick")
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_ellipsis()
+                        .child(identity.to_string()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .text_ellipsis()
+                        .child(subtitle),
                 ),
         )
         .child(
-            Icon::new(IconName::Settings)
-                .text_sm()
-                .text_color(cx.theme().muted_foreground),
+            Button::new("sidebar-settings")
+                .ghost()
+                .compact()
+                .icon(IconName::Settings)
+                .tooltip("Settings")
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    on_settings(event, window, cx);
+                }),
         )
 }
 
@@ -237,41 +246,48 @@ fn instance_row(
     let group = SharedString::from(format!("instance-row-{key}"));
     let muted = cx.theme().muted_foreground;
     let editing = renaming.is_some();
-    let name_color = if selected {
-        cx.theme().foreground
-    } else {
-        muted
-    };
+    let name_color = cx.theme().foreground;
+    const ACTIONS_W: f32 = 80.0;
     h_flex()
         .id(row_id)
         .group(group.clone())
+        .relative()
         .w_full()
         .px_2()
-        .py_1()
+        .py(px(6.))
         .gap_2()
         .items_center()
         .rounded(px(10.))
         .when(selected && !editing, |this| {
-            this.bg(if crate::sidebar_is_glass() {
-                rgba(0xffffff22).into()
+            let fill: gpui::Hsla = if crate::sidebar_is_glass() {
+                rgba(0xffffff20).into()
             } else {
-                cx.theme().muted
-            })
+                rgb(0x2a2824).into()
+            };
+            this.bg(fill)
         })
         .hover(|this| {
             this.bg(if crate::sidebar_is_glass() {
-                rgba(0xffffff18).into()
+                rgba(0xffffff1c).into()
             } else {
                 cx.theme().muted
             })
         })
         .cursor_pointer()
         .on_click(on_click)
-        .child(instance_mark(instance, cx))
+        .child(instance_cover(
+            instance.icon.as_deref(),
+            instance.loader,
+            52.0,
+            cx,
+        ))
         .child(
             v_flex()
                 .min_w_0()
                 .flex_1()
+                .when(!editing, |this| {
+                    this.group_hover(group.clone(), |style| style.pr(px(ACTIONS_W)))
+                })
                 .when_some(renaming, |this, form| {
                     this.child(
                         h_flex()
@@ -297,40 +313,64 @@ fn instance_row(
                 })
                 .when(!editing, |this| {
                     this.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "instance-name-{}",
-                                instance.id.as_hyphenated()
-                            )))
-                            .text_sm()
-                            .font_weight(if selected {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_ellipsis()
-                            .text_color(name_color)
-                            .child(instance.name.clone()),
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "instance-name-{}",
+                                        instance.id.as_hyphenated()
+                                    )))
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(if selected {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .whitespace_normal()
+                                    .line_clamp(2)
+                                    .text_color(name_color)
+                                    .child(instance.name.clone()),
+                            )
+                            .when(instance.running, |this| {
+                                this.child(
+                                    div()
+                                        .size(px(7.))
+                                        .rounded_full()
+                                        .bg(cx.theme().success)
+                                        .flex_shrink_0(),
+                                )
+                            }),
                     )
-                    .child(div().text_xs().text_color(muted).child(format!(
-                        "{} · {}",
-                        instance.minecraft_version,
-                        loader_label(instance.loader)
-                    )))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(muted)
+                            .child(format!(
+                                "{} · {}",
+                                instance.minecraft_version,
+                                loader_label(instance.loader)
+                            )),
+                    )
                 }),
         )
-        .when(instance.running && !editing, |this| {
-            this.child(
-                div()
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(cx.theme().success)
-                    .flex_shrink_0(),
-            )
-        })
         .when(!editing, |this| {
             this.child(
                 h_flex()
+                    .absolute()
+                    .right(px(8.))
+                    .top_0()
+                    .bottom_0()
+                    .items_center()
                     .gap_1()
                     .invisible()
                     .group_hover(group, |style| style.visible())
@@ -347,7 +387,7 @@ fn instance_row(
                     ))
                     .child(icon_btn(
                         format!("rename-{key}"),
-                        IconName::ALargeSmall,
+                        asset_icon("icons/pencil.svg"),
                         false,
                         on_rename,
                         cx,
@@ -361,23 +401,6 @@ fn instance_row(
                     )),
             )
         })
-}
-
-fn instance_mark(instance: &InstanceSummary, cx: &App) -> impl IntoElement {
-    let (bg, fg) = loader_tint(instance.loader, cx);
-    div()
-        .size(px(28.))
-        .flex_shrink_0()
-        .rounded(px(7.))
-        .bg(bg)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            Icon::new(loader_icon(instance.loader))
-                .text_sm()
-                .text_color(fg),
-        )
 }
 
 fn asset_icon(path: &'static str) -> Icon {
@@ -396,6 +419,11 @@ fn icon_btn(
     } else {
         cx.theme().muted_foreground
     };
+    let hover_bg = if crate::sidebar_is_glass() {
+        rgba(0xffffff38).into()
+    } else {
+        cx.theme().selection
+    };
     div()
         .id(id.into())
         .size(px(22.))
@@ -404,7 +432,8 @@ fn icon_btn(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|this| this.bg(cx.theme().secondary_hover))
+        .text_color(color)
+        .hover(|this| this.bg(hover_bg).text_color(cx.theme().foreground))
         .on_click(on_click)
-        .child(icon.into().text_sm().text_color(color))
+        .child(icon.into().text_sm())
 }

@@ -4,8 +4,6 @@ pub mod content;
 pub mod error;
 pub mod fabric;
 pub mod forge;
-pub mod neoforge;
-pub mod quilt;
 pub mod http;
 pub mod ids;
 pub mod instance;
@@ -14,7 +12,9 @@ pub mod launch;
 pub mod logfmt;
 pub mod mojang;
 pub mod nbt;
+pub mod neoforge;
 pub mod paths;
+pub mod quilt;
 pub mod redact;
 pub mod sandbox;
 pub mod skin;
@@ -22,9 +22,9 @@ pub mod store;
 pub mod types;
 
 pub use catalog::{
-    parse_manifest_loader, CatalogCategory, CatalogError, CatalogFile, CatalogFileFilter,
-    CatalogPage, CatalogProject, CatalogProjectDetail, CatalogProjectId, CatalogProvider,
-    CatalogQuery, CatalogSort, ContentClass, ProviderId,
+    CatalogCategory, CatalogError, CatalogFile, CatalogFileFilter, CatalogPage, CatalogProject,
+    CatalogProjectDetail, CatalogProjectId, CatalogProvider, CatalogQuery, CatalogSort,
+    ContentClass, ProviderId, parse_manifest_loader,
 };
 pub use error::EngineError;
 pub use http::HttpFiles;
@@ -119,7 +119,7 @@ impl Engine {
     fn from_keychain(paths: LauncherPaths, kc: &dyn Keychain) -> Result<Self, EngineError> {
         paths.create_dirs()?;
         let (store, master_key) = Store::open(&paths.db, kc)?;
-        let (events, _) = tokio::sync::broadcast::channel(16384);
+        let (events, _) = tokio::sync::broadcast::channel(512);
         Ok(Self {
             paths,
             store: Arc::new(parking_lot::Mutex::new(store)),
@@ -167,15 +167,19 @@ impl Engine {
         let processes = self.processes.lock();
         Ok(rows
             .into_iter()
-            .map(|row| InstanceSummary {
-                id: row.id,
-                slug: row.slug,
-                name: row.name,
-                minecraft_version: row.minecraft_version,
-                loader: row.loader,
-                last_played_at: row.last_played_at,
-                playtime_secs: row.playtime_secs as u64,
-                running: processes.contains_key(&row.id),
+            .map(|row| {
+                let icon = cache_instance_icon(&self.paths, &row);
+                InstanceSummary {
+                    id: row.id,
+                    slug: row.slug,
+                    name: row.name,
+                    minecraft_version: row.minecraft_version,
+                    loader: row.loader,
+                    last_played_at: row.last_played_at,
+                    playtime_secs: row.playtime_secs as u64,
+                    running: processes.contains_key(&row.id),
+                    icon,
+                }
             })
             .collect())
     }
@@ -186,6 +190,10 @@ impl Engine {
 
     pub fn sandbox_status(&self) -> SandboxStatus {
         crate::sandbox::sandbox_status()
+    }
+
+    pub fn library_dir(&self) -> &std::path::Path {
+        &self.paths.root
     }
 
     pub async fn create_instance(&self, spec: CreateInstance) -> Result<InstanceId, EngineError> {
@@ -370,6 +378,20 @@ pub(crate) fn now_ms() -> i64 {
         Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
         Err(_) => 0,
     }
+}
+
+fn cache_instance_icon(paths: &LauncherPaths, row: &InstanceRow) -> Option<std::path::PathBuf> {
+    let bytes = row.icon_png.as_ref().filter(|bytes| !bytes.is_empty())?;
+    let dir = paths.root.join("cache").join("instance-icons");
+    std::fs::create_dir_all(&dir).ok()?;
+    let dest = dir.join(format!("{}.png", row.id.as_hyphenated()));
+    let stale = std::fs::metadata(&dest)
+        .map(|meta| meta.len() as usize != bytes.len())
+        .unwrap_or(true);
+    if stale {
+        std::fs::write(&dest, bytes).ok()?;
+    }
+    Some(dest)
 }
 
 pub(crate) fn instance_not_found(paths: &LauncherPaths) -> EngineError {

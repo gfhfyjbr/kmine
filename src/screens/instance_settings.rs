@@ -1,22 +1,20 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, Entity, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{App, Entity, IntoElement, ParentElement, Styled, Window, div};
 use gpui_component::{
-    ActiveTheme, Disableable, IndexPath, Sizable,
-    button::{Button, ButtonVariants},
-    checkbox::Checkbox,
-    h_flex,
+    ActiveTheme, Disableable, IndexPath,
     input::{Input, InputState},
     select::{Select, SelectState},
     slider::{Slider, SliderState},
+    switch::Switch,
     v_flex,
 };
 use kmine_engine::{
     AccountId, AccountSummary, InstanceId, InstancePatch, InstanceRow, SandboxStatus,
 };
 
-use crate::chrome::section_label;
+use crate::chrome::{card, section_label, status_alert};
 
 pub const DEFAULT_ACCOUNT: &str = "Default account";
 const SANDBOX_WARNING: &str = "Native mods and RPC may break.";
@@ -124,7 +122,6 @@ pub fn settings_tab(
     sandbox_status: &SandboxStatus,
     status: &str,
     on_sandbox: impl Fn(bool, &mut Window, &mut App) + 'static,
-    on_save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let sandbox_available = matches!(sandbox_status, SandboxStatus::Available);
@@ -137,99 +134,94 @@ pub fn settings_tab(
         .child(
             v_flex()
                 .w_full()
-                .gap_3()
+                .gap_2()
                 .child(section_label("Memory", cx))
-                .child(field_block(
-                    format!("Minimum ({min_label})"),
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_2()
-                        .child(Slider::new(&form.memory_min)),
-                    cx,
-                ))
-                .child(field_block(
-                    format!("Maximum ({max_label})"),
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_2()
-                        .child(Slider::new(&form.memory_max)),
-                    cx,
-                )),
-        )
-        .child(
-            v_flex()
-                .w_full()
-                .gap_3()
-                .child(section_label("Launch", cx))
-                .child(field_block(
-                    "JVM flags",
-                    Input::new(&form.jvm_flags).small(),
-                    cx,
-                ))
-                .child(field_block(
-                    "Java path",
-                    Input::new(&form.java_path).small(),
-                    cx,
-                ))
-                .child(field_block("Account", Select::new(&form.account), cx)),
+                .child(
+                    card(cx)
+                        .child(field_block(
+                            format!("Minimum · {min_label}"),
+                            div().w_full().px_1().child(Slider::new(&form.memory_min)),
+                            cx,
+                        ))
+                        .child(field_block(
+                            format!("Maximum · {max_label}"),
+                            div().w_full().px_1().child(Slider::new(&form.memory_max)),
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Zero leaves the launcher default."),
+                        ),
+                ),
         )
         .child(
             v_flex()
                 .w_full()
                 .gap_2()
-                .p_4()
-                .rounded(cx.theme().radius_lg)
-                .bg(cx.theme().muted)
+                .child(section_label("Launch", cx))
                 .child(
-                    Checkbox::new("sandbox")
-                        .label("Sandbox the game process")
-                        .checked(form.sandbox)
-                        .disabled(!sandbox_available)
-                        .on_click(move |checked, window, cx| {
-                            on_sandbox(*checked, window, cx);
-                        }),
-                )
+                    card(cx)
+                        .child(field_block(
+                            "JVM flags",
+                            Input::new(&form.jvm_flags).w_full(),
+                            cx,
+                        ))
+                        .child(field_block(
+                            "Java path",
+                            Input::new(&form.java_path).w_full(),
+                            cx,
+                        ))
+                        .child(field_block(
+                            "Account",
+                            Select::new(&form.account).w_full(),
+                            cx,
+                        )),
+                ),
+        )
+        .child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(section_label("Sandbox", cx))
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SANDBOX_WARNING.to_string()),
-                )
-                .when(
-                    matches!(sandbox_status, SandboxStatus::Unavailable { .. }),
-                    |this| {
-                        let reason = match sandbox_status {
-                            SandboxStatus::Unavailable { reason } => reason.clone(),
-                            SandboxStatus::Available => String::new(),
-                        };
-                        this.child(
+                    card(cx)
+                        .child(
+                            Switch::new("sandbox")
+                                .label("Sandbox the game process")
+                                .checked(form.sandbox)
+                                .disabled(!sandbox_available)
+                                .on_click(move |checked, window, cx| {
+                                    on_sandbox(*checked, window, cx);
+                                }),
+                        )
+                        .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(reason),
+                                .child(SANDBOX_WARNING.to_string()),
                         )
-                    },
+                        .when(
+                            matches!(sandbox_status, SandboxStatus::Unavailable { .. }),
+                            |this| {
+                                let reason = match sandbox_status {
+                                    SandboxStatus::Unavailable { reason } => reason.clone(),
+                                    SandboxStatus::Available => String::new(),
+                                };
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(reason),
+                                )
+                            },
+                        ),
                 ),
         )
         .when(!status.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(status.to_string()),
-            )
+            this.child(status_alert(status, cx))
         })
-        .child(
-            h_flex().justify_end().child(
-                Button::new("settings-save")
-                    .primary()
-                    .label("Save")
-                    .w(px(120.))
-                    .on_click(on_save),
-            ),
-        )
 }
 
 fn field_block(label: impl Into<String>, field: impl IntoElement, cx: &App) -> impl IntoElement {
@@ -242,7 +234,7 @@ fn field_block(label: impl Into<String>, field: impl IntoElement, cx: &App) -> i
                 .text_color(cx.theme().muted_foreground)
                 .child(label.into()),
         )
-        .child(field)
+        .child(div().w_full().child(field))
 }
 
 fn ram_from_slider(value: f32) -> Option<u32> {
@@ -252,7 +244,9 @@ fn ram_from_slider(value: f32) -> Option<u32> {
 
 fn ram_label(value: f32) -> String {
     match ram_from_slider(value) {
-        None => "default".into(),
+        None => "Default".into(),
+        Some(mb) if mb % 1024 == 0 => format!("{} GB", mb / 1024),
+        Some(mb) if mb >= 1024 => format!("{:.1} GB", mb as f32 / 1024.0),
         Some(mb) => format!("{mb} MB"),
     }
 }

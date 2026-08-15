@@ -5,6 +5,7 @@ mod game_output;
 mod modals;
 mod providers;
 mod screens;
+mod smooth_scroll;
 mod theme;
 
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use kmine_engine::{Engine, LauncherPaths};
 
 actions!(kmine, [Quit]);
 
-fn window_background() -> WindowBackgroundAppearance {
+pub fn window_background() -> WindowBackgroundAppearance {
     if cfg!(target_os = "macos") {
         WindowBackgroundAppearance::Blurred
     } else if cfg!(target_os = "windows") {
@@ -32,7 +33,11 @@ pub fn sidebar_is_glass() -> bool {
 
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
+        .worker_threads(2)
+        .max_blocking_threads(16)
+        .thread_stack_size(512 * 1024)
+        .enable_io()
+        .enable_time()
         .build()
         .expect("tokio");
     let paths = LauncherPaths::new(LauncherPaths::default_root());
@@ -52,6 +57,7 @@ fn main() {
                 #[cfg(not(target_os = "macos"))]
                 KeyBinding::new("alt-f4", Quit, None),
                 KeyBinding::new("escape", Cancel, Some("Modal")),
+                KeyBinding::new("escape", Cancel, Some("GameOutput")),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
             cx.set_menus(vec![Menu {

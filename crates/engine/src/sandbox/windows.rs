@@ -439,6 +439,10 @@ fn nul_handle() -> Result<HANDLE, EngineError> {
 fn command_line(plan: &LaunchPlan) -> String {
     let mut out = String::new();
     append_quoted(&mut out, plan.java.as_os_str());
+    for arg in super::sandbox_tmp_jvm_args(plan) {
+        out.push(' ');
+        append_quoted(&mut out, OsStr::new(&arg));
+    }
     for arg in &plan.jvm_args {
         out.push(' ');
         append_quoted(&mut out, OsStr::new(arg));

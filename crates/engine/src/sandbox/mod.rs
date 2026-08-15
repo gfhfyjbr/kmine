@@ -122,8 +122,22 @@ pub fn spawn_sandboxed(plan: &LaunchPlan) -> Result<std::process::Child, EngineE
     }
 }
 
+pub(crate) fn sandbox_tmp_jvm_args(plan: &LaunchPlan) -> [String; 4] {
+    let tmp = plan.cwd.display();
+    [
+        format!("-Djava.io.tmpdir={tmp}"),
+        format!("-Djna.tmpdir={tmp}"),
+        format!(
+            "-Dorg.lwjgl.system.SharedLibraryExtractPath={}",
+            plan.natives_dir.display()
+        ),
+        format!("-Dio.netty.native.workdir={tmp}"),
+    ]
+}
+
 pub(crate) fn apply_plan_stdio(cmd: &mut std::process::Command, plan: &LaunchPlan) {
-    cmd.args(&plan.jvm_args)
+    cmd.args(sandbox_tmp_jvm_args(plan))
+        .args(&plan.jvm_args)
         .arg(&plan.main_class)
         .args(&plan.game_args)
         .current_dir(&plan.cwd)
@@ -273,6 +287,21 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn write_profile_allows_window_focus_and_hid() {
+        let text = super::macos::profile_source(1, 1, true);
+        for needle in [
+            "com.apple.windowserver.session",
+            "com.apple.coreservices.launchservicesd",
+            "com.apple.iohideventsystem",
+            "IOHIDEventServiceUserClient",
+            "com.apple.HIToolbox",
+        ] {
+            assert!(text.contains(needle), "missing {needle}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn write_profile_allows_mapping_natives() {
         let text = super::macos::profile_source(1, 1, true);
         assert!(
@@ -287,6 +316,40 @@ mod tests {
         assert!(
             write_line.contains("file-map-executable"),
             "write subpaths must be mappable for LWJGL natives: {write_line}"
+        );
+    }
+
+    #[test]
+    fn sandbox_tmp_jvm_args_point_at_writable_dirs() {
+        let plan = LaunchPlan {
+            java: PathBuf::from("/data/kmine/cache/runtime/java/bin/java"),
+            jvm_args: vec![],
+            main_class: "n.m.Main".into(),
+            game_args: vec![],
+            classpath: vec![],
+            natives_dir: PathBuf::from("/data/kmine/cache/natives/aaa"),
+            cwd: PathBuf::from("/data/kmine/instances/A/.minecraft"),
+            env: vec![],
+            sandbox: SandboxSpec {
+                enabled: true,
+                allow_read: vec![],
+                allow_write: vec![],
+                network: true,
+            },
+        };
+        let args = super::sandbox_tmp_jvm_args(&plan);
+        assert!(
+            args.iter()
+                .any(|arg| arg == "-Djava.io.tmpdir=/data/kmine/instances/A/.minecraft")
+        );
+        assert!(args.iter().any(|arg| arg.contains("jna.tmpdir")));
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("SharedLibraryExtractPath") && arg.contains("natives/aaa"))
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("io.netty.native.workdir"))
         );
     }
 

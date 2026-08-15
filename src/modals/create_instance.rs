@@ -15,7 +15,7 @@ use gpui_component::{
 use kmine_engine::{CreateInstance, Loader};
 
 use crate::chrome::{
-    default_cover, loader_label, modal, modal_body, modal_close, modal_footer, modal_header,
+    cta, default_cover, loader_label, modal, modal_body, modal_close, modal_footer, modal_header,
     section_label, sheet,
 };
 
@@ -171,8 +171,7 @@ fn render_loader(
                             .on_click(on_back),
                     )
                     .child(
-                        Button::new("create-submit")
-                            .primary()
+                        cta("create-submit")
                             .label("Create")
                             .loading(creating)
                             .disabled(creating)

@@ -5,7 +5,6 @@ use crate::fabric::{
     profile_url,
 };
 use crate::forge::{merge_forge, prepare_forge, run_processors};
-use crate::neoforge::prepare_neoforge;
 use crate::http::HttpFiles;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::instance_not_found;
@@ -15,6 +14,7 @@ use crate::mojang::{
     ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, extract_natives, fetch_assets,
     fetch_client, fetch_libraries, join_classpath, natives_dir_name, select_libraries,
 };
+use crate::neoforge::prepare_neoforge;
 use crate::now_ms;
 use crate::redact::redact_line_with_tokens;
 use crate::store::Store;
@@ -295,6 +295,9 @@ impl Engine {
             run_processors(&java, &profile, &self.paths, &client, cancel).await?;
             version = merge_forge(version, forge_version);
         }
+        // JNA < 5.13 aborts on macOS when dlerror() exceeds 1024 bytes
+        // (long DYLD search paths from a terminal/Steam parent).
+        crate::mojang::apply_legacy_jna_workaround(&mut version);
 
         check_cancel(cancel)?;
         let artifacts = select_libraries(&version);
@@ -380,7 +383,12 @@ impl Engine {
                 classpath.push(dest);
             }
         }
-        classpath.push(client);
+        // Modern Forge/NeoForge (BootstrapLauncher) load the patched client +
+        // extra jars from libraryDirectory. Putting the vanilla client on -cp
+        // yields two JPMS modules named `minecraft` (glow_sticks / similar).
+        if append_vanilla_client(row.loader) {
+            classpath.push(client);
+        }
 
         let (features, quick_play_singleplayer, quick_play_multiplayer) =
             quick_play_launch(quick_play);
@@ -501,7 +509,7 @@ async fn merge_quilt_profile(
     cancel: &CancellationToken,
 ) -> Result<VersionInfo, EngineError> {
     use crate::quilt::{
-        QuiltLoaderIndex, QuiltProfile, LOADER_INDEX_URL, merge_quilt, pick_loader_version,
+        LOADER_INDEX_URL, QuiltLoaderIndex, QuiltProfile, merge_quilt, pick_loader_version,
         profile_url,
     };
 
@@ -896,6 +904,10 @@ fn publish_log(
     }
 }
 
+fn append_vanilla_client(loader: Loader) -> bool {
+    !matches!(loader, Loader::Forge | Loader::NeoForge)
+}
+
 fn record_session(db: &Path, id: InstanceId, elapsed: Duration) {
     let Ok(store) = Store::open_file(db) else {
         return;
@@ -986,6 +998,15 @@ mod tests {
             VERSION_MANIFEST_URL,
             "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
         );
+    }
+
+    #[test]
+    fn forge_runtime_classpath_omits_vanilla_client() {
+        assert!(super::append_vanilla_client(Loader::Vanilla));
+        assert!(super::append_vanilla_client(Loader::Fabric));
+        assert!(super::append_vanilla_client(Loader::Quilt));
+        assert!(!super::append_vanilla_client(Loader::Forge));
+        assert!(!super::append_vanilla_client(Loader::NeoForge));
     }
 
     #[tokio::test]

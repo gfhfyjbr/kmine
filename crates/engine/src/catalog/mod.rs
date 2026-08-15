@@ -28,7 +28,12 @@ mod tests {
             ("forge-47.4.0", "1.20.1", Loader::Forge, "47.4.0"),
             ("fabric-0.16.9", "1.21.1", Loader::Fabric, "0.16.9"),
             ("fabric-0.16.9-1.21.1", "1.21.1", Loader::Fabric, "0.16.9"),
-            ("fabric-0.16.9-1.21.1", "1.20.1", Loader::Fabric, "0.16.9-1.21.1"),
+            (
+                "fabric-0.16.9-1.21.1",
+                "1.20.1",
+                Loader::Fabric,
+                "0.16.9-1.21.1",
+            ),
             ("neoforge-21.1.66", "1.21.1", Loader::NeoForge, "21.1.66"),
             ("neoforge-47.1.106", "1.20.1", Loader::NeoForge, "47.1.106"),
             ("quilt-0.27.1", "1.21.1", Loader::Quilt, "0.27.1"),
