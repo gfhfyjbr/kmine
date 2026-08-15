@@ -590,6 +590,9 @@ impl KmineApp {
                 .spawn(async move { engine.catalog_categories(provider, class).await })
                 .await;
             this.update(cx, |this, cx| {
+                if this.search_gen != generation {
+                    return;
+                }
                 let Some(catalog) = this.catalog.as_mut() else {
                     return;
                 };
@@ -598,12 +601,7 @@ impl KmineApp {
                         catalog.categories = categories;
                         catalog.no_key = false;
                         catalog.error = None;
-                        if this.search_gen == generation {
-                            this.run_catalog_search(false, cx);
-                        } else {
-                            catalog.loading = false;
-                            cx.notify();
-                        }
+                        this.run_catalog_search(false, cx);
                     }
                     Ok(Err(EngineError::Catalog(CatalogError::Unavailable))) => {
                         catalog.no_key = true;
@@ -1047,6 +1045,7 @@ impl KmineApp {
         let engine = self.engine.clone();
         let rt = self.rt.clone();
         let events = engine.event_sender();
+        let reload_content_on_fail = matches!(target, CatalogTarget::Instance(_));
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = rt
                 .spawn(async move {
@@ -1078,9 +1077,24 @@ impl KmineApp {
                         this.status.clear();
                         this.reload_content();
                     }
-                    Ok(Err(EngineError::Cancelled)) => this.status.clear(),
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
+                    Ok(Err(EngineError::Cancelled)) => {
+                        this.status.clear();
+                        if reload_content_on_fail {
+                            this.reload_content();
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        this.status = err.to_string();
+                        if reload_content_on_fail {
+                            this.reload_content();
+                        }
+                    }
+                    Err(err) => {
+                        this.status = err.to_string();
+                        if reload_content_on_fail {
+                            this.reload_content();
+                        }
+                    }
                 }
                 cx.notify();
             })
