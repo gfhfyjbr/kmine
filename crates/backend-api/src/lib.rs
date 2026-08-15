@@ -57,15 +57,20 @@ pub fn router(state: Arc<RwLock<AppState>>) -> Router {
 }
 
 pub fn reextract(state: &Arc<RwLock<AppState>>) {
-    let mut st = state.write().unwrap();
-    let Some(source) = st.source.clone() else {
+    let source = {
+        let st = state.read().unwrap();
+        st.source.clone()
+    };
+    let Some(source) = source else {
         return;
     };
-    if let Ok(key) = extract_from_source(&source) {
-        st.key = Some(key);
-    } else {
-        st.key = None;
+    // Extract outside the lock: URL sources use blocking HTTP (long timeout).
+    let key = extract_from_source(&source).ok();
+    let mut st = state.write().unwrap();
+    if st.source.as_deref() != Some(source.as_str()) {
+        return;
     }
+    st.key = key;
     if is_url(&source) {
         st.last_url_extract = Some(Instant::now());
     } else {
@@ -85,34 +90,60 @@ fn is_url(source: &str) -> bool {
 }
 
 fn refresh_if_needed(state: &Arc<RwLock<AppState>>) {
-    let mut st = state.write().unwrap();
-    let Some(source) = st.source.clone() else {
-        return;
-    };
-    if is_url(&source) {
-        let stale = st
-            .last_url_extract
-            .map(|t| t.elapsed() >= URL_REFRESH)
-            .unwrap_or(true);
-        if !stale {
+    let decision = {
+        let st = state.read().unwrap();
+        let Some(source) = st.source.clone() else {
             return;
-        }
-        if let Ok(key) = extract_from_source(&source) {
-            st.key = Some(key);
-        }
-        st.last_url_extract = Some(Instant::now());
-    } else {
-        let mtime = mtime_if_path(&source);
-        if mtime == st.last_mtime {
-            return;
-        }
-        if let Ok(key) = extract_from_source(&source) {
-            st.key = Some(key);
+        };
+        if is_url(&source) {
+            let stale = st
+                .last_url_extract
+                .map(|t| t.elapsed() >= URL_REFRESH)
+                .unwrap_or(true);
+            if !stale {
+                return;
+            }
+            RefreshDecision::Url(source)
         } else {
-            st.key = None;
+            let mtime = mtime_if_path(&source);
+            if mtime == st.last_mtime {
+                return;
+            }
+            RefreshDecision::Path { source, mtime }
         }
-        st.last_mtime = mtime;
+    };
+
+    // Extract outside the lock so blocking URL downloads do not freeze handlers.
+    match decision {
+        RefreshDecision::Url(source) => {
+            let key = extract_from_source(&source).ok();
+            let mut st = state.write().unwrap();
+            if st.source.as_deref() != Some(source.as_str()) {
+                return;
+            }
+            if let Some(key) = key {
+                st.key = Some(key);
+            }
+            st.last_url_extract = Some(Instant::now());
+        }
+        RefreshDecision::Path { source, mtime } => {
+            let key = extract_from_source(&source).ok();
+            let mut st = state.write().unwrap();
+            if st.source.as_deref() != Some(source.as_str()) {
+                return;
+            }
+            st.key = key;
+            st.last_mtime = mtime;
+        }
     }
+}
+
+enum RefreshDecision {
+    Url(String),
+    Path {
+        source: String,
+        mtime: Option<SystemTime>,
+    },
 }
 
 async fn require_token(
