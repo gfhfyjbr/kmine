@@ -1,0 +1,35 @@
+{
+  "id": 5754631,
+  "gameId": 432,
+  "modId": 250898,
+  "isAvailable": true,
+  "displayName": "oreexcavation-1.13.174.jar",
+  "fileName": "oreexcavation-1.13.174.jar",
+  "releaseType": 1,
+  "fileStatus": 4,
+  "hashes": [
+    { "algo": 1, "value": "19b1540f5e69fe6d04d174915e834bb614bf51ce" },
+    { "algo": 2, "value": "1e87b83ed930e864de2a3150255f30bf" }
+  ],
+  "fileDate": "2024-09-25T09:04:51.11Z",
+  "fileLength": 277361,
+  "downloadCount": 0,
+  "downloadUrl": "https://edge.forgecdn.net/files/5754/631/oreexcavation-1.13.174.jar",
+  "gameVersions": ["1.20.1", "Forge"],
+  "sortableGameVersions": [
+    {
+      "gameVersionName": "1.20.1",
+      "gameVersionPadded": "0000000001.0000000020.0000000001",
+      "gameVersion": "1.20.1",
+      "gameVersionReleaseDate": "2023-06-07T00:00:00Z",
+      "gameVersionTypeId": 1
+    }
+  ],
+  "dependencies": [{ "modId": 123456, "relationType": 3 }],
+  "alternateFileId": 0,
+  "isServerPack": false,
+  "serverPackFileId": 0,
+  "isEarlyAccessContent": false,
+  "fileFingerprint": 3871571640,
+  "modules": [{ "name": "oreexcavation", "fingerprint": 1095884136 }]
+}

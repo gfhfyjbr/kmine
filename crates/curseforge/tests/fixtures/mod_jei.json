@@ -1,0 +1,55 @@
+{
+  "id": 238222,
+  "gameId": 432,
+  "name": "Just Enough Items (JEI)",
+  "slug": "jei",
+  "links": {
+    "websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei",
+    "wikiUrl": "",
+    "issuesUrl": "https://github.com/mezz/JustEnoughItems",
+    "sourceUrl": "https://github.com/mezz/JustEnoughItems"
+  },
+  "summary": "Item and recipe viewing mod",
+  "status": 4,
+  "downloadCount": 123456789,
+  "isFeatured": false,
+  "primaryCategoryId": 421,
+  "categories": [
+    {
+      "id": 421,
+      "gameId": 432,
+      "name": "API and Library",
+      "slug": "library-api",
+      "isClass": false,
+      "classId": 6
+    }
+  ],
+  "classId": 6,
+  "authors": [{ "id": 1, "name": "mezz", "url": "https://www.curseforge.com/members/mezz" }],
+  "logo": {
+    "id": 1,
+    "modId": 238222,
+    "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/jei.png",
+    "url": "https://media.forgecdn.net/avatars/jei.png"
+  },
+  "screenshots": [],
+  "mainFileId": 5700000,
+  "latestFiles": [],
+  "latestFilesIndexes": [
+    {
+      "gameVersion": "1.20.1",
+      "fileId": 5700000,
+      "filename": "jei-1.20.1-xxx.jar",
+      "releaseType": 1,
+      "gameVersionTypeId": 1,
+      "modLoader": 1
+    }
+  ],
+  "dateCreated": "2015-11-19T00:00:00Z",
+  "dateModified": "2025-01-01T00:00:00Z",
+  "dateReleased": "2025-01-01T00:00:00Z",
+  "allowModDistribution": true,
+  "gamePopularityRank": 1,
+  "isAvailable": true,
+  "thumbsUpCount": 0
+}
