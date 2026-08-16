@@ -11,7 +11,7 @@ use crate::instance_not_found;
 use crate::java::resolve_java;
 use crate::logfmt::LogDecoder;
 use crate::mojang::{
-    ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, extract_natives, fetch_assets,
+    ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, ensure_natives, fetch_assets,
     fetch_client, fetch_libraries, join_classpath, natives_dir_name, select_libraries,
 };
 use crate::neoforge::prepare_neoforge;
@@ -325,20 +325,14 @@ impl Engine {
             .paths
             .cache_natives
             .join(natives_dir_name(&artifacts, row.sandbox));
-        std::fs::create_dir_all(&natives_dir).map_err(|e| EngineError::io(&natives_dir, e))?;
-        let native_count = artifacts.iter().filter(|a| a.extract_natives).count() as u64;
-        let mut natives_done = 0u64;
-        if native_count == 0 {
-            progress.set("Natives", 0, 0);
-        }
-        for artifact in artifacts.iter().filter(|a| a.extract_natives) {
-            check_cancel(cancel)?;
-            let jar = self.paths.cache_libraries.join(&artifact.path);
-            let exclude = exclude_for(&version, &artifact.path);
-            extract_natives(&jar, &natives_dir, &exclude)?;
-            natives_done += 1;
-            progress.set("Natives", natives_done, native_count);
-        }
+        ensure_natives(
+            &artifacts,
+            &self.paths.cache_libraries,
+            &natives_dir,
+            mode,
+            progress,
+            |path| exclude_for(&version, path),
+        )?;
 
         let cwd = self.paths.instance_minecraft(&row.slug);
         std::fs::create_dir_all(&cwd).map_err(|e| EngineError::io(&cwd, e))?;

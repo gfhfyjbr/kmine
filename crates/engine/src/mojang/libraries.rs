@@ -91,6 +91,18 @@ pub async fn fetch_libraries(
 }
 
 pub fn natives_dir_name(artifacts: &[LibraryArtifact], sandbox: bool) -> String {
+    let hex = natives_stamp_hex(artifacts);
+    if sandbox {
+        format!("{hex}-sandbox")
+    } else {
+        hex
+    }
+}
+
+pub const NATIVES_STAMP_NAME: &str = ".kmine-natives-ok";
+
+// Same hash as natives_dir_name without the optional "-sandbox" suffix.
+pub fn natives_stamp_hex(artifacts: &[LibraryArtifact]) -> String {
     let mut paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
     paths.sort_unstable();
     let mut hasher = Sha1::new();
@@ -98,12 +110,60 @@ pub fn natives_dir_name(artifacts: &[LibraryArtifact], sandbox: bool) -> String 
         hasher.update(path.as_bytes());
         hasher.update(b"\n");
     }
-    let hex = hex::encode(hasher.finalize());
-    if sandbox {
-        format!("{hex}-sandbox")
-    } else {
-        hex
+    hex::encode(hasher.finalize())
+}
+
+pub fn natives_stamp_valid(natives_dir: &Path, hex: &str) -> bool {
+    let path = natives_dir.join(NATIVES_STAMP_NAME);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => body.trim() == hex,
+        Err(_) => false,
     }
+}
+
+pub fn write_natives_stamp(natives_dir: &Path, hex: &str) -> Result<(), EngineError> {
+    std::fs::create_dir_all(natives_dir).map_err(|e| EngineError::io(natives_dir, e))?;
+    let path = natives_dir.join(NATIVES_STAMP_NAME);
+    std::fs::write(&path, hex.as_bytes()).map_err(|e| EngineError::io(&path, e))
+}
+
+pub fn ensure_natives(
+    artifacts: &[LibraryArtifact],
+    libraries_dir: &Path,
+    natives_dir: &Path,
+    mode: PrepareMode,
+    progress: &dyn ProgressSink,
+    mut exclude_for: impl FnMut(&str) -> Vec<String>,
+) -> Result<(), EngineError> {
+    let hex = natives_stamp_hex(artifacts);
+    if mode == PrepareMode::Warm && natives_stamp_valid(natives_dir, &hex) {
+        progress.set("Natives", 1, 1);
+        return Ok(());
+    }
+
+    if mode == PrepareMode::Verify {
+        if natives_dir.exists() {
+            std::fs::remove_dir_all(natives_dir).map_err(|e| EngineError::io(natives_dir, e))?;
+        }
+    }
+
+    std::fs::create_dir_all(natives_dir).map_err(|e| EngineError::io(natives_dir, e))?;
+
+    let native_count = artifacts.iter().filter(|a| a.extract_natives).count() as u64;
+    if native_count == 0 {
+        progress.set("Natives", 0, 0);
+    }
+    let mut natives_done = 0u64;
+    for artifact in artifacts.iter().filter(|a| a.extract_natives) {
+        let jar = libraries_dir.join(&artifact.path);
+        let exclude = exclude_for(&artifact.path);
+        extract_natives(&jar, natives_dir, &exclude)?;
+        natives_done += 1;
+        progress.set("Natives", natives_done, native_count);
+    }
+
+    write_natives_stamp(natives_dir, &hex)?;
+    Ok(())
 }
 
 pub fn extract_natives(jar: &Path, dest: &Path, exclude: &[String]) -> Result<(), EngineError> {
@@ -203,10 +263,19 @@ fn skip_native_entry(name: &str, exclude: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibraryArtifact, extract_natives, natives_dir_name, select_libraries};
+    use super::{
+        LibraryArtifact, ensure_natives, extract_natives, natives_dir_name, natives_stamp_hex,
+        natives_stamp_valid, select_libraries, write_natives_stamp,
+    };
     use crate::mojang::VersionInfo;
     use crate::mojang::rules::current_os_name;
+    use crate::types::{PrepareMode, ProgressSink};
     use std::io::Write;
+
+    struct NoopProgress;
+    impl ProgressSink for NoopProgress {
+        fn set(&self, _title: &str, _done: u64, _total: u64) {}
+    }
 
     fn load_fixture(name: &str) -> VersionInfo {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -267,13 +336,7 @@ mod tests {
     async fn fetch_libraries_rejects_parent_path() {
         use crate::http::HttpFiles;
         use crate::paths::LauncherPaths;
-        use crate::types::ProgressSink;
         use tokio_util::sync::CancellationToken;
-
-        struct Noop;
-        impl ProgressSink for Noop {
-            fn set(&self, _title: &str, _done: u64, _total: u64) {}
-        }
 
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
@@ -282,9 +345,9 @@ mod tests {
             &HttpFiles::new().unwrap(),
             &paths,
             &[artifact("../escape.jar")],
-            &Noop,
+            &NoopProgress,
             &CancellationToken::new(),
-            crate::types::PrepareMode::Warm,
+            PrepareMode::Warm,
         )
         .await
         .unwrap_err();
@@ -299,5 +362,69 @@ mod tests {
         assert_eq!(name, natives_dir_name(&[b.clone(), a.clone()], false));
         assert_eq!(name.len(), 40);
         assert_eq!(natives_dir_name(&[a, b], true), format!("{name}-sandbox"));
+    }
+
+    #[test]
+    fn natives_stamp_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let hex = "abc123";
+        assert!(!natives_stamp_valid(dir.path(), hex));
+        write_natives_stamp(dir.path(), hex).unwrap();
+        assert!(natives_stamp_valid(dir.path(), hex));
+        assert!(!natives_stamp_valid(dir.path(), "nope"));
+    }
+
+    #[test]
+    fn ensure_natives_warm_skips_when_stamp_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let natives = dir.path().join("natives");
+        std::fs::create_dir_all(&natives).unwrap();
+        let artifacts = vec![LibraryArtifact {
+            path: "natives/foo.jar".into(),
+            url: String::new(),
+            sha1: None,
+            size: None,
+            extract_natives: true,
+        }];
+        let hex = natives_stamp_hex(&artifacts);
+        write_natives_stamp(&natives, &hex).unwrap();
+        ensure_natives(
+            &artifacts,
+            dir.path(),
+            &natives,
+            PrepareMode::Warm,
+            &NoopProgress,
+            |_| {
+                panic!("extract should not run");
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ensure_natives_verify_does_not_skip_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let natives = dir.path().join("natives");
+        std::fs::create_dir_all(&natives).unwrap();
+        let artifacts = vec![LibraryArtifact {
+            path: "natives/foo.jar".into(),
+            url: String::new(),
+            sha1: None,
+            size: None,
+            extract_natives: true,
+        }];
+        let hex = natives_stamp_hex(&artifacts);
+        write_natives_stamp(&natives, &hex).unwrap();
+        let err = ensure_natives(
+            &artifacts,
+            dir.path(),
+            &natives,
+            PrepareMode::Verify,
+            &NoopProgress,
+            |_| Vec::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::error::EngineError::Io { .. }));
+        assert!(!natives_stamp_valid(&natives, &hex));
     }
 }
