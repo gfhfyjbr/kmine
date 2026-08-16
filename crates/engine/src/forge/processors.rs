@@ -441,4 +441,55 @@ mod tests {
         let _ = err;
         assert!(!stamp.exists(), "verify must delete stamp before run");
     }
+
+    #[tokio::test]
+    async fn warm_does_not_skip_processors_after_verify_deleted_stamp() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let installer = root.path().join("inst.jar");
+        std::fs::write(&installer, b"installer-bytes").unwrap();
+        let sha = installer_sha1(&installer).unwrap();
+        let stamp = processor_stamp_path(&paths, &installer);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, &sha).unwrap();
+
+        let profile = ForgeInstallProfile {
+            processors: vec![ForgeProcessor {
+                sides: vec!["client".into()],
+                jar: "net.minecraftforge:installertools:1.0.0".into(),
+                classpath: vec![],
+                args: vec![],
+                ..Default::default()
+            }],
+            installer_path: installer.clone(),
+            ..Default::default()
+        };
+        let verify_err = run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Verify,
+        )
+        .await
+        .unwrap_err();
+        let _ = verify_err;
+        assert!(!stamp.exists());
+
+        // stamp absent → Warm must not return Ok before run_one
+        let warm_err = run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Warm,
+        )
+        .await
+        .unwrap_err();
+        let _ = warm_err;
+        assert!(!stamp.exists(), "failed Warm must not write stamp");
+    }
 }

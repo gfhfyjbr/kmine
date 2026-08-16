@@ -427,4 +427,30 @@ mod tests {
         assert!(matches!(err, crate::error::EngineError::Io { .. }));
         assert!(!natives_stamp_valid(&natives, &hex));
     }
+
+    #[test]
+    fn verify_clears_natives_stamp_before_extract() {
+        let dir = tempfile::tempdir().unwrap();
+        let natives = dir.path().join("natives");
+        std::fs::create_dir_all(&natives).unwrap();
+        write_natives_stamp(&natives, "abc123").unwrap();
+        let artifacts = vec![LibraryArtifact {
+            path: "missing/native.jar".into(),
+            url: String::new(),
+            sha1: None,
+            size: None,
+            extract_natives: true,
+        }];
+        let err = ensure_natives(
+            &artifacts,
+            dir.path(),
+            &natives,
+            PrepareMode::Verify,
+            &NoopProgress,
+            |_| vec![],
+        )
+        .unwrap_err();
+        let _ = err;
+        assert!(!natives_stamp_valid(&natives, "abc123"));
+    }
 }

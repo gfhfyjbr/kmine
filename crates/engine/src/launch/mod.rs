@@ -1062,6 +1062,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_overlap_is_instance_busy() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Busy".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        engine.preparing.lock().insert(id);
+        let err = engine
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Verify,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::InstanceBusy));
+    }
+
+    #[tokio::test]
     async fn prepare_vanilla_offline_errors_without_account() {
         let engine = test_engine().await;
         let id = engine
