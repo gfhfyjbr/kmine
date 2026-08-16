@@ -589,6 +589,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
+        let installer = root.path().join("installer.jar");
+        std::fs::write(&installer, b"installer").unwrap();
         let profile = ForgeInstallProfile {
             processors: vec![ForgeProcessor {
                 sides: vec!["server".into()],
@@ -596,6 +598,7 @@ mod tests {
                 classpath: vec![],
                 args: vec![],
             }],
+            installer_path: installer,
             ..Default::default()
         };
         run_processors(
@@ -604,6 +607,7 @@ mod tests {
             &paths,
             Path::new("/c.jar"),
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap();
@@ -626,12 +630,17 @@ mod tests {
             .unwrap();
         zip.finish().unwrap();
 
+        // Empty installer path is used only for stamp hashing; create a real file.
+        let installer = root.path().join("installer.jar");
+        std::fs::write(&installer, b"installer").unwrap();
+
         let profile = ForgeInstallProfile {
             processors: vec![ForgeProcessor {
                 sides: vec!["client".into()],
                 jar: "net.minecraftforge:tools:1.0".into(),
                 ..Default::default()
             }],
+            installer_path: installer,
             ..Default::default()
         };
         let err = run_processors(
@@ -640,6 +649,7 @@ mod tests {
             &paths,
             Path::new("/c.jar"),
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap_err();

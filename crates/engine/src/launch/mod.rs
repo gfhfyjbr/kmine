@@ -308,7 +308,7 @@ impl Engine {
 
         if let Some((profile, forge_version)) = installer {
             check_cancel(cancel)?;
-            run_processors(&java, &profile, &self.paths, &client, cancel).await?;
+            run_processors(&java, &profile, &self.paths, &client, cancel, mode).await?;
             version = merge_forge(version, forge_version);
         }
         // JNA < 5.13 aborts on macOS when dlerror() exceeds 1024 bytes
