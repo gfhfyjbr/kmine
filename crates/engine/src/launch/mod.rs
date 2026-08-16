@@ -250,8 +250,14 @@ impl Engine {
         progress.set("Version", 1, 1);
         let version: VersionInfo = read_json(&version_path)?;
         let mut version = match row.loader {
-            Loader::Fabric => merge_fabric_profile(&http, &row, version, progress, cancel).await?,
-            Loader::Quilt => merge_quilt_profile(&http, &row, version, progress, cancel).await?,
+            Loader::Fabric => {
+                merge_fabric_profile(&http, &self.paths, &row, version, progress, cancel, mode)
+                    .await?
+            }
+            Loader::Quilt => {
+                merge_quilt_profile(&http, &self.paths, &row, version, progress, cancel, mode)
+                    .await?
+            }
             _ => version,
         };
         let installer = match row.loader {
@@ -477,16 +483,28 @@ impl Engine {
     }
 }
 
+fn fabric_index_path(paths: &crate::LauncherPaths) -> PathBuf {
+    paths.cache_meta.join("fabric-loader-index.json")
+}
+
+fn quilt_index_path(paths: &crate::LauncherPaths) -> PathBuf {
+    paths.cache_meta.join("quilt-loader-index.json")
+}
+
 async fn merge_fabric_profile(
     http: &HttpFiles,
+    paths: &crate::LauncherPaths,
     row: &InstanceRow,
     vanilla: VersionInfo,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<VersionInfo, EngineError> {
     check_cancel(cancel)?;
     progress.set("Fabric loader", 0, 2);
-    let index: FabricLoaderIndex = http.get_json(LOADER_INDEX_URL, cancel).await?;
+    let index: FabricLoaderIndex = http
+        .load_meta_json(LOADER_INDEX_URL, &fabric_index_path(paths), mode, cancel)
+        .await?;
     let loader = match pick_loader_version(&index, row.loader_version.as_deref()) {
         Ok(version) => version,
         Err(EngineError::LoaderUnavailable { loader, .. }) => {
@@ -516,10 +534,12 @@ async fn merge_fabric_profile(
 
 async fn merge_quilt_profile(
     http: &HttpFiles,
+    paths: &crate::LauncherPaths,
     row: &InstanceRow,
     vanilla: VersionInfo,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<VersionInfo, EngineError> {
     use crate::quilt::{
         LOADER_INDEX_URL, QuiltLoaderIndex, QuiltProfile, merge_quilt, pick_loader_version,
@@ -528,7 +548,9 @@ async fn merge_quilt_profile(
 
     check_cancel(cancel)?;
     progress.set("Quilt loader", 0, 2);
-    let index: QuiltLoaderIndex = http.get_json(LOADER_INDEX_URL, cancel).await?;
+    let index: QuiltLoaderIndex = http
+        .load_meta_json(LOADER_INDEX_URL, &quilt_index_path(paths), mode, cancel)
+        .await?;
     let loader = match pick_loader_version(&index, row.loader_version.as_deref()) {
         Ok(version) => version,
         Err(EngineError::LoaderUnavailable { loader, .. }) => {
@@ -955,6 +977,7 @@ mod tests {
     use crate::store::MemoryKeychain;
     use crate::types::{CreateInstance, PrepareMode, ProgressSink, QuickPlay};
     use crate::{Engine, LauncherPaths};
+    use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
@@ -1010,6 +1033,28 @@ mod tests {
         assert_eq!(
             VERSION_MANIFEST_URL,
             "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        );
+    }
+
+    #[test]
+    fn fabric_index_cache_path() {
+        let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
+        assert!(
+            super::fabric_index_path(&paths)
+                .ends_with("cache/meta/fabric-loader-index.json")
+                || super::fabric_index_path(&paths)
+                    .ends_with("cache\\meta\\fabric-loader-index.json")
+        );
+    }
+
+    #[test]
+    fn quilt_index_cache_path() {
+        let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
+        assert!(
+            super::quilt_index_path(&paths)
+                .ends_with("cache/meta/quilt-loader-index.json")
+                || super::quilt_index_path(&paths)
+                    .ends_with("cache\\meta\\quilt-loader-index.json")
         );
     }
 
