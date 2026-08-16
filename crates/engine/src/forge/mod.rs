@@ -7,7 +7,7 @@ use crate::http::{DownloadJob, HttpFiles};
 use crate::ids::Loader;
 use crate::mojang::{Artifact, Library, LibraryDownloads, VersionInfo};
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde::Deserialize;
@@ -165,18 +165,18 @@ pub async fn prepare_forge(
     preferred: Option<&str>,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(ForgeInstallProfile, VersionInfo), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
     progress.set("Forge installer", 0, 2);
     let meta_path = paths.cache_meta.join("forge-maven-metadata.xml");
-    if meta_path.exists() {
-        let _ = std::fs::remove_file(&meta_path);
-    }
-    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel)
+    let xml_bytes = http
+        .load_meta_bytes(MAVEN_METADATA_URL, &meta_path, mode, cancel)
         .await?;
-    let xml = std::fs::read_to_string(&meta_path).map_err(|e| EngineError::io(&meta_path, e))?;
+    let xml = String::from_utf8(xml_bytes)
+        .map_err(|e| EngineError::io(&meta_path, io::Error::other(e.to_string())))?;
     let versions = parse_maven_versions(&xml)?;
     let ver = match pick_forge_version(mc, &versions, preferred) {
         Ok(ver) => ver,
@@ -198,9 +198,9 @@ pub async fn prepare_forge(
         "net/minecraftforge/forge/{ver}/forge-{ver}-installer.jar"
     ));
     let sha1_path = installer_path.with_extension("jar.sha1");
-    let sha1 = fetch_installer_sha1(http, &url, &sha1_path, cancel).await?;
+    let sha1 = fetch_installer_sha1(http, &url, &sha1_path, cancel, mode).await?;
     match http
-        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel)
+        .download_sha1(&url, &installer_path, sha1.as_deref(), None, cancel, mode)
         .await
     {
         Err(EngineError::Http { status: 404, .. }) => {
@@ -217,7 +217,7 @@ pub async fn prepare_forge(
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
-    fetch_installer_libraries(http, paths, &profile, progress, cancel).await?;
+    fetch_installer_libraries(http, paths, &profile, progress, cancel, mode).await?;
     Ok((profile, forge_version))
 }
 
@@ -226,9 +226,13 @@ pub(crate) async fn fetch_installer_sha1(
     installer_url: &str,
     dest: &Path,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<Option<String>, EngineError> {
     let url = format!("{installer_url}.sha1");
-    match http.download_sha1(&url, dest, None, cancel).await {
+    match http
+        .download_sha1(&url, dest, None, None, cancel, mode)
+        .await
+    {
         Ok(()) => {
             let text = std::fs::read_to_string(dest).map_err(|e| EngineError::io(dest, e))?;
             let hash = text
@@ -254,6 +258,7 @@ pub(crate) async fn fetch_installer_libraries(
     profile: &ForgeInstallProfile,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(), EngineError> {
     let mut libs = profile.libraries.clone();
     for lib in &mut libs {
@@ -289,7 +294,7 @@ pub(crate) async fn fetch_installer_libraries(
             });
         }
     }
-    http.download_many(jobs, "Forge libraries", progress, cancel)
+    http.download_many(jobs, "Forge libraries", progress, cancel, mode)
         .await?;
     Ok(())
 }
@@ -587,6 +592,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
+        let installer = root.path().join("installer.jar");
+        std::fs::write(&installer, b"installer").unwrap();
         let profile = ForgeInstallProfile {
             processors: vec![ForgeProcessor {
                 sides: vec!["server".into()],
@@ -594,6 +601,7 @@ mod tests {
                 classpath: vec![],
                 args: vec![],
             }],
+            installer_path: installer,
             ..Default::default()
         };
         run_processors(
@@ -602,6 +610,7 @@ mod tests {
             &paths,
             Path::new("/c.jar"),
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap();
@@ -624,12 +633,17 @@ mod tests {
             .unwrap();
         zip.finish().unwrap();
 
+        // Empty installer path is used only for stamp hashing; create a real file.
+        let installer = root.path().join("installer.jar");
+        std::fs::write(&installer, b"installer").unwrap();
+
         let profile = ForgeInstallProfile {
             processors: vec![ForgeProcessor {
                 sides: vec!["client".into()],
                 jar: "net.minecraftforge:tools:1.0".into(),
                 ..Default::default()
             }],
+            installer_path: installer,
             ..Default::default()
         };
         let err = run_processors(
@@ -638,6 +652,7 @@ mod tests {
             &paths,
             Path::new("/c.jar"),
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap_err();

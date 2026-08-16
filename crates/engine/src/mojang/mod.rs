@@ -8,8 +8,9 @@ pub use args::{ArgContext, build_args, interpolate, join_classpath};
 pub use assets::{AssetsRoot, fetch_assets};
 pub use jna::{apply_legacy_jna_workaround, upgrade_legacy_jna};
 pub use libraries::{
-    LibraryArtifact, extract_natives, fetch_client, fetch_libraries, natives_dir_name,
-    select_libraries,
+    LibraryArtifact, NATIVES_STAMP_NAME, ensure_natives, extract_natives, fetch_client,
+    fetch_libraries, natives_dir_name, natives_stamp_hex, natives_stamp_valid, select_libraries,
+    write_natives_stamp,
 };
 pub use rules::{
     FeatureSet, Rule, RuleAction, RuleFeatures, RuleOs, current_os_arch, current_os_name,

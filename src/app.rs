@@ -19,12 +19,14 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::chrome::{empty_panel, filled_segment, motion, status_alert};
+use crate::chrome::{
+    empty_panel, filled_segment, is_success_status, motion, status_alert, FILES_VERIFIED,
+};
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
     CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort, ContentClass, ContentEntry,
-    ContentFolder, Engine, EngineError, Event, InstanceId, InstanceSummary, Loader,
+    ContentFolder, Engine, EngineError, Event, InstanceId, InstanceSummary, Loader, PrepareMode,
     QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
@@ -32,7 +34,7 @@ use crate::modals::accounts::{self, AccountsModal};
 use crate::modals::catalog::{self, CatalogModal, CatalogTarget};
 use crate::modals::confirm;
 use crate::modals::create_instance::{self, CreateInstanceForm};
-use crate::modals::progress::{self, EventProgressSink, ProgressModal};
+use crate::modals::progress::{self, EventProgressSink, ProgressModal, VERIFY_HEADING};
 use crate::modals::settings;
 use crate::screens::{instance_content, instance_play, instance_settings, instances};
 use crate::smooth_scroll::SmoothScroll;
@@ -60,6 +62,8 @@ pub struct KmineApp {
     show_accounts: bool,
     show_settings: bool,
     status: String,
+    status_for: Option<InstanceId>,
+    status_epoch: u64,
     create: Option<CreateInstanceForm>,
     catalog: Option<CatalogModal>,
     search_gen: u64,
@@ -103,6 +107,8 @@ impl KmineApp {
             show_accounts: false,
             show_settings: false,
             status: String::new(),
+            status_for: None,
+            status_epoch: 0,
             create: None,
             catalog: None,
             search_gen: 0,
@@ -188,9 +194,62 @@ impl KmineApp {
         self.instances.iter().find(|instance| instance.id == id)
     }
 
+    fn clear_status(&mut self) {
+        self.status.clear();
+        self.status_for = None;
+        self.status_epoch = self.status_epoch.wrapping_add(1);
+    }
+
+    fn dismiss_status(&mut self, cx: &mut Context<Self>) {
+        self.clear_status();
+        cx.notify();
+    }
+
+    fn arm_success_status_timeout(&mut self, cx: &mut Context<Self>) {
+        if !is_success_status(&self.status) {
+            return;
+        }
+        self.status_epoch = self.status_epoch.wrapping_add(1);
+        let epoch = self.status_epoch;
+        let rt = self.rt.clone();
+        cx.spawn(async move |this, cx| {
+            rt.spawn(async { tokio::time::sleep(Duration::from_secs(4)).await })
+                .await
+                .ok();
+            this.update(cx, |this, cx| {
+                if this.status_epoch == epoch {
+                    this.clear_status();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_status(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_for = None;
+    }
+
+    fn set_instance_status(&mut self, id: InstanceId, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_for = Some(id);
+    }
+
+    fn visible_status(&self) -> &str {
+        match self.status_for {
+            Some(id) if self.selected != Some(id) => "",
+            _ => self.status.as_str(),
+        }
+    }
+
     fn select_instance(&mut self, id: InstanceId, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected == Some(id) {
             return;
+        }
+        if is_success_status(&self.status) {
+            self.clear_status();
         }
         self.pane_from = self.instance_pane;
         self.instance_pane = InstancePane::Play;
@@ -262,9 +321,9 @@ impl KmineApp {
             }
             Ok(None) => {
                 self.settings = None;
-                self.status = "instance not found".into();
+                self.set_instance_status(id, "instance not found");
             }
-            Err(err) => self.status = err.to_string(),
+            Err(err) => self.set_instance_status(id, err.to_string()),
         }
     }
 
@@ -328,9 +387,9 @@ impl KmineApp {
             this.update(cx, |this, cx| {
                 this.settings_saving = false;
                 match result {
-                    Ok(Ok(())) => this.status.clear(),
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
+                    Ok(Ok(())) => this.clear_status(),
+                    Ok(Err(err)) => this.set_instance_status(id, err.to_string()),
+                    Err(err) => this.set_instance_status(id, err.to_string()),
                 }
                 if this.settings_dirty {
                     this.settings_dirty = false;
@@ -357,10 +416,10 @@ impl KmineApp {
         };
         match self.engine.set_content_enabled(id, &path, enabled) {
             Ok(()) => {
-                self.status.clear();
+                self.clear_status();
                 self.reload_content();
             }
-            Err(err) => self.status = err.to_string(),
+            Err(err) => self.set_instance_status(id, err.to_string()),
         }
         cx.notify();
     }
@@ -396,10 +455,10 @@ impl KmineApp {
         };
         match self.engine.delete_content(id, &path) {
             Ok(()) => {
-                self.status.clear();
+                self.clear_status();
                 self.reload_content();
             }
-            Err(err) => self.status = err.to_string(),
+            Err(err) => self.set_instance_status(id, err.to_string()),
         }
         cx.notify();
     }
@@ -481,7 +540,7 @@ impl KmineApp {
                 self.refresh_instances();
                 self.reload_quick_play();
             }
-            Event::Error(message) => self.status = message,
+            Event::Error(message) => self.set_status(message),
             Event::LogLine { .. } => {}
         }
     }
@@ -507,7 +566,7 @@ impl KmineApp {
         })
         .detach();
         self.create = Some(form);
-        self.status.clear();
+        self.clear_status();
         self.show_create = true;
         cx.notify();
     }
@@ -516,7 +575,7 @@ impl KmineApp {
         if let Some(form) = self.create.as_mut() {
             form.phase = create_instance::CreatePhase::Loader(loader);
             form.name.update(cx, |state, cx| state.focus(window, cx));
-            self.status.clear();
+            self.clear_status();
             cx.notify();
         }
     }
@@ -524,7 +583,7 @@ impl KmineApp {
     fn create_back(&mut self, cx: &mut Context<Self>) {
         if let Some(form) = self.create.as_mut() {
             form.phase = create_instance::CreatePhase::Kind;
-            self.status.clear();
+            self.clear_status();
             cx.notify();
         }
     }
@@ -603,7 +662,7 @@ impl KmineApp {
             .detach();
         }
         self.catalog = Some(modal);
-        self.status.clear();
+        self.clear_status();
         self.search_gen = self.search_gen.wrapping_add(1);
         self.detail_gen = self.detail_gen.wrapping_add(1);
         self.load_catalog_categories(cx);
@@ -1113,12 +1172,12 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id: progress_id,
-            name: name.clone(),
+            heading: format!("Preparing {name}"),
             title: "Installing…".into(),
             done: 0,
             total: 0,
         });
-        self.status.clear();
+        self.clear_status();
         cx.notify();
 
         let engine = self.engine.clone();
@@ -1150,26 +1209,26 @@ impl KmineApp {
                         this.refresh_instances();
                         this.reload_content();
                         this.reload_quick_play();
-                        this.status.clear();
+                        this.clear_status();
                     }
                     Ok(Ok(InstallOutcome::Content)) => {
-                        this.status.clear();
+                        this.clear_status();
                         this.reload_content();
                     }
                     Ok(Err(EngineError::Cancelled)) => {
-                        this.status.clear();
+                        this.clear_status();
                         if reload_content_on_fail {
                             this.reload_content();
                         }
                     }
                     Ok(Err(err)) => {
-                        this.status = err.to_string();
+                        this.set_status(err.to_string());
                         if reload_content_on_fail {
                             this.reload_content();
                         }
                     }
                     Err(err) => {
-                        this.status = err.to_string();
+                        this.set_status(err.to_string());
                         if reload_content_on_fail {
                             this.reload_content();
                         }
@@ -1224,7 +1283,7 @@ impl KmineApp {
         };
         let engine = self.engine.clone();
         let rt = self.rt.clone();
-        self.status = "Creating…".into();
+        self.set_status("Creating…");
         cx.notify();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -1240,10 +1299,10 @@ impl KmineApp {
                         this.refresh_instances();
                         this.reload_content();
                         this.reload_quick_play();
-                        this.status.clear();
+                        this.clear_status();
                     }
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
+                    Ok(Err(err)) => this.set_status(err.to_string()),
+                    Err(err) => this.set_status(err.to_string()),
                 }
                 cx.notify();
             })
@@ -1267,7 +1326,7 @@ impl KmineApp {
         })
         .detach();
         self.rename = Some(instances::RenameForm { id, name: input });
-        self.status.clear();
+        self.clear_status();
         cx.notify();
     }
 
@@ -1284,7 +1343,7 @@ impl KmineApp {
         let name = form.name.read(cx).value().to_string();
         let engine = self.engine.clone();
         let rt = self.rt.clone();
-        self.status = "Renaming…".into();
+        self.set_status("Renaming…");
         cx.notify();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let result = rt
@@ -1295,10 +1354,10 @@ impl KmineApp {
                     Ok(Ok(())) => {
                         this.rename = None;
                         this.refresh_instances();
-                        this.status.clear();
+                        this.clear_status();
                     }
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
+                    Ok(Err(err)) => this.set_instance_status(id, err.to_string()),
+                    Err(err) => this.set_instance_status(id, err.to_string()),
                 }
                 cx.notify();
             })
@@ -1355,10 +1414,10 @@ impl KmineApp {
                         this.refresh_instances();
                         this.reload_content();
                         this.reload_quick_play();
-                        this.status.clear();
+                        this.clear_status();
                     }
-                    Ok(Err(err)) => this.status = err.to_string(),
-                    Err(err) => this.status = err.to_string(),
+                    Ok(Err(err)) => this.set_status(err.to_string()),
+                    Err(err) => this.set_status(err.to_string()),
                 }
                 cx.notify();
             })
@@ -1501,12 +1560,12 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id,
-            name: instance.name.clone(),
+            heading: format!("Preparing {}", instance.name),
             title: "Preparing…".into(),
             done: 0,
             total: 0,
         });
-        self.status.clear();
+        self.clear_status();
         cx.notify();
 
         let engine = self.engine.clone();
@@ -1516,7 +1575,9 @@ impl KmineApp {
             let prepared = rt
                 .spawn(async move {
                     let sink = EventProgressSink::new(engine.event_sender(), id);
-                    let plan = engine.prepare(id, &sink, cancel, quick_play).await?;
+                    let plan = engine
+                        .prepare(id, &sink, cancel, quick_play, PrepareMode::Warm)
+                        .await?;
                     engine.spawn(id, plan)
                 })
                 .await;
@@ -1526,7 +1587,7 @@ impl KmineApp {
                     this.update(cx, |this, cx| {
                         this.progress = None;
                         this.cancel = None;
-                        this.status.clear();
+                        this.clear_status();
                         this.refresh_instances();
                         this.open_game_output(id, name, cx);
                         cx.notify();
@@ -1542,10 +1603,10 @@ impl KmineApp {
                                 this.refresh_accounts();
                                 this.show_settings = false;
                                 this.show_accounts = true;
-                                this.status = EngineError::NoAccount.to_string();
+                                this.set_status(EngineError::NoAccount.to_string());
                             }
-                            EngineError::Cancelled => this.status.clear(),
-                            other => this.status = other.to_string(),
+                            EngineError::Cancelled => this.clear_status(),
+                            other => this.set_instance_status(id, other.to_string()),
                         }
                         cx.notify();
                     })
@@ -1555,7 +1616,80 @@ impl KmineApp {
                     this.update(cx, |this, cx| {
                         this.progress = None;
                         this.cancel = None;
-                        this.status = err.to_string();
+                        this.set_instance_status(id, err.to_string());
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn verify_files(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+        let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
+            return;
+        };
+        if instance.running || self.progress.is_some() {
+            return;
+        }
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.progress = Some(ProgressModal {
+            id,
+            heading: VERIFY_HEADING.into(),
+            title: VERIFY_HEADING.into(),
+            done: 0,
+            total: 0,
+        });
+        self.clear_status();
+        cx.notify();
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let prepared = rt
+                .spawn(async move {
+                    let sink = EventProgressSink::new(engine.event_sender(), id);
+                    engine
+                        .prepare(id, &sink, cancel, None, PrepareMode::Verify)
+                        .await
+                        .map(|_| ())
+                })
+                .await;
+            match prepared {
+                Ok(Ok(())) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        this.set_instance_status(id, FILES_VERIFIED);
+                        this.arm_success_status_timeout(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(err)) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        match err {
+                            EngineError::NoAccount => {
+                                this.refresh_accounts();
+                                this.show_settings = false;
+                                this.show_accounts = true;
+                                this.set_status(EngineError::NoAccount.to_string());
+                            }
+                            EngineError::Cancelled => this.clear_status(),
+                            other => this.set_instance_status(id, other.to_string()),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        this.set_instance_status(id, err.to_string());
                         cx.notify();
                     })
                     .ok();
@@ -1618,7 +1752,7 @@ impl Render for KmineApp {
         let this = cx.weak_entity();
         let selected = self.selected_instance().cloned();
         let identity = self.accounts.identity_label().to_string();
-        let status = self.status.clone();
+        let status = self.visible_status().to_string();
         let pane = self.instance_pane;
         let sandbox_status = self.engine.sandbox_status();
 
@@ -1749,6 +1883,9 @@ impl Render for KmineApp {
                                         self.settings.as_ref(),
                                         &sandbox_status,
                                         self.progress.as_ref().is_some_and(|p| p.id == instance.id),
+                                        self.progress.as_ref().is_some_and(|p| {
+                                            p.id == instance.id && p.heading == VERIFY_HEADING
+                                        }),
                                         self.progress.is_none(),
                                         &self.play_scroll,
                                         &self.content_scroll,
@@ -1980,6 +2117,7 @@ fn right_pane(
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
     preparing: bool,
+    verifying: bool,
     add_enabled: bool,
     play_scroll: &SmoothScroll,
     content_scroll: &SmoothScroll,
@@ -2013,11 +2151,21 @@ fn right_pane(
                 .child(instance_play::launch_hero(
                     instance,
                     preparing,
+                    verifying,
                     {
                         let this = this.clone();
                         move |_, _, cx| {
                             this.update(cx, |this, cx| {
                                 this.play_or_stop(id, None, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.verify_files(id, cx);
                             })
                             .ok();
                         }
@@ -2078,7 +2226,18 @@ fn tab_body(
         .gap_4()
                 .when(
                     !status.is_empty() && pane != InstancePane::Settings,
-                    |this| this.child(status_alert(status, cx)),
+                    |el| {
+                        el.child(status_alert(
+                            status,
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
+                                }
+                            },
+                            cx,
+                        ))
+                    },
                 )
                 .child(match pane {
                     InstancePane::Play => instance_play::play_tab(
@@ -2162,6 +2321,12 @@ fn tab_body(
                                             this.set_sandbox(enabled, cx);
                                         })
                                         .ok();
+                                    }
+                                },
+                                {
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
                                     }
                                 },
                                 cx,

@@ -66,11 +66,15 @@ pub fn play_tab(
 pub fn launch_hero(
     instance: &InstanceSummary,
     preparing: bool,
+    verifying: bool,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_verify: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let running = instance.running;
-    let (label, icon) = if preparing {
+    let (label, icon) = if verifying {
+        ("Verifying", IconName::Loader)
+    } else if preparing {
         ("Preparing", IconName::Loader)
     } else if running {
         ("Stop", IconName::Pause)
@@ -135,28 +139,36 @@ pub fn launch_hero(
                 ),
         )
         .child(
-            style_cta(Button::new("play").large())
-                .when(running, |this| this.danger())
-                .when(!running, |this| this.primary())
-                .disabled(preparing)
-                .loading(preparing)
-                .when(preparing, |this| {
-                    this.icon(IconName::Loader).label("Preparing")
-                })
-                .when(!preparing, |this| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(
-                                Icon::new(icon)
-                                    .with_size(px(13.))
-                                    .when(!running, |icon| icon.ml(px(1.))),
+            v_flex()
+                .gap_2()
+                .child(
+                    style_cta(Button::new("play").large())
+                        .when(running, |this| this.danger())
+                        .when(!running, |this| this.primary())
+                        .disabled(preparing)
+                        .loading(preparing)
+                        .when(preparing, |this| this.icon(IconName::Loader).label(label))
+                        .when(!preparing, |this| {
+                            this.child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        Icon::new(icon)
+                                            .with_size(px(13.))
+                                            .when(!running, |icon| icon.ml(px(1.))),
+                                    )
+                                    .child(label),
                             )
-                            .child(label),
-                    )
-                })
-                .on_click(on_play),
+                        })
+                        .on_click(on_play),
+                )
+                .child(
+                    Button::new("verify-files")
+                        .label("Verify files")
+                        .disabled(preparing || running)
+                        .on_click(on_verify),
+                ),
         )
 }
 

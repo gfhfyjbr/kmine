@@ -2,11 +2,41 @@ use super::{ForgeInstallProfile, ForgeProcessor, extract_zip_entry, maven_path};
 use crate::error::EngineError;
 use crate::mojang::join_classpath;
 use crate::paths::LauncherPaths;
+use crate::types::PrepareMode;
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio_util::sync::CancellationToken;
+
+pub fn processor_stamp_path(paths: &LauncherPaths, installer: &Path) -> PathBuf {
+    let stem = installer
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("installer");
+    paths
+        .cache_meta
+        .join("forge-processors")
+        .join(format!("{stem}.ok"))
+}
+
+pub fn installer_sha1(installer: &Path) -> Result<String, EngineError> {
+    let mut file = std::fs::File::open(installer).map_err(|e| EngineError::io(installer, e))?;
+    let mut hasher = Sha1::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| EngineError::io(installer, e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
 
 pub fn subst_arg(
     arg: &str,
@@ -28,9 +58,25 @@ pub async fn run_processors(
     paths: &LauncherPaths,
     vanilla_client: &Path,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
+    }
+    let stamp = processor_stamp_path(paths, profile.installer_path.as_path());
+    let current = installer_sha1(profile.installer_path.as_path())?;
+    if mode == PrepareMode::Warm {
+        if let Ok(body) = std::fs::read_to_string(&stamp) {
+            if body.trim() == current {
+                return Ok(());
+            }
+        }
+    } else {
+        match std::fs::remove_file(&stamp) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(EngineError::io(&stamp, err)),
+        }
     }
     let extract_dir = processor_extract_dir(paths, profile.installer_path.as_path());
     std::fs::create_dir_all(&extract_dir).map_err(|e| EngineError::io(&extract_dir, e))?;
@@ -51,6 +97,10 @@ pub async fn run_processors(
         }
         run_one(java, proc, paths, &data, vanilla_client, installer, cancel).await?;
     }
+    if let Some(parent) = stamp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| EngineError::io(parent, e))?;
+    }
+    std::fs::write(&stamp, current.as_bytes()).map_err(|e| EngineError::io(&stamp, e))?;
     Ok(())
 }
 
@@ -295,4 +345,151 @@ fn replace_braces(input: &str, mut lookup: impl FnMut(&str) -> Option<String>) -
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forge::{ForgeInstallProfile, ForgeProcessor};
+    use crate::types::PrepareMode;
+    use std::path::PathBuf;
+
+    #[test]
+    fn processor_stamp_path_uses_installer_stem() {
+        let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
+        let stamp = processor_stamp_path(
+            &paths,
+            Path::new("/cache/forge-1.21.1-52.0.0-installer.jar"),
+        );
+        assert!(
+            stamp.ends_with("cache/meta/forge-processors/forge-1.21.1-52.0.0-installer.ok")
+                || stamp.ends_with(
+                    "cache\\meta\\forge-processors\\forge-1.21.1-52.0.0-installer.ok"
+                )
+        );
+    }
+
+    #[tokio::test]
+    async fn run_processors_warm_skips_when_stamp_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let installer = root.path().join("inst.jar");
+        std::fs::write(&installer, b"installer-bytes").unwrap();
+        let sha = installer_sha1(&installer).unwrap();
+        let stamp = processor_stamp_path(&paths, &installer);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, sha).unwrap();
+
+        let profile = ForgeInstallProfile {
+            processors: vec![ForgeProcessor {
+                sides: vec!["client".into()],
+                jar: "net.minecraftforge:installertools:1.0.0".into(),
+                classpath: vec![],
+                args: vec![],
+                ..Default::default()
+            }],
+            installer_path: installer.clone(),
+            ..Default::default()
+        };
+        // java path can be fake: skip must happen before spawn
+        run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Warm,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_processors_verify_deletes_stamp_and_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let installer = root.path().join("inst.jar");
+        std::fs::write(&installer, b"installer-bytes").unwrap();
+        let sha = installer_sha1(&installer).unwrap();
+        let stamp = processor_stamp_path(&paths, &installer);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, &sha).unwrap();
+
+        let profile = ForgeInstallProfile {
+            processors: vec![ForgeProcessor {
+                sides: vec!["client".into()],
+                jar: "net.minecraftforge:installertools:1.0.0".into(),
+                classpath: vec![],
+                args: vec![],
+                ..Default::default()
+            }],
+            installer_path: installer.clone(),
+            ..Default::default()
+        };
+        let err = run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Verify,
+        )
+        .await
+        .unwrap_err();
+        let _ = err;
+        assert!(!stamp.exists(), "verify must delete stamp before run");
+    }
+
+    #[tokio::test]
+    async fn warm_does_not_skip_processors_after_verify_deleted_stamp() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let installer = root.path().join("inst.jar");
+        std::fs::write(&installer, b"installer-bytes").unwrap();
+        let sha = installer_sha1(&installer).unwrap();
+        let stamp = processor_stamp_path(&paths, &installer);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, &sha).unwrap();
+
+        let profile = ForgeInstallProfile {
+            processors: vec![ForgeProcessor {
+                sides: vec!["client".into()],
+                jar: "net.minecraftforge:installertools:1.0.0".into(),
+                classpath: vec![],
+                args: vec![],
+                ..Default::default()
+            }],
+            installer_path: installer.clone(),
+            ..Default::default()
+        };
+        let verify_err = run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Verify,
+        )
+        .await
+        .unwrap_err();
+        let _ = verify_err;
+        assert!(!stamp.exists());
+
+        // stamp absent → Warm must not return Ok before run_one
+        let warm_err = run_processors(
+            Path::new("/no/java"),
+            &profile,
+            &paths,
+            Path::new("/no/client.jar"),
+            &CancellationToken::new(),
+            PrepareMode::Warm,
+        )
+        .await
+        .unwrap_err();
+        let _ = warm_err;
+        assert!(!stamp.exists(), "failed Warm must not write stamp");
+    }
 }

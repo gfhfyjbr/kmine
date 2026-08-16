@@ -11,7 +11,7 @@ use crate::instance_not_found;
 use crate::java::resolve_java;
 use crate::logfmt::LogDecoder;
 use crate::mojang::{
-    ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, extract_natives, fetch_assets,
+    ArgContext, AssetsRoot, FeatureSet, VersionInfo, build_args, ensure_natives, fetch_assets,
     fetch_client, fetch_libraries, join_classpath, natives_dir_name, select_libraries,
 };
 use crate::neoforge::prepare_neoforge;
@@ -19,7 +19,8 @@ use crate::now_ms;
 use crate::redact::redact_line_with_tokens;
 use crate::store::Store;
 use crate::types::{
-    AccountRecord, GameProcessId, InstanceRow, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec,
+    AccountRecord, GameProcessId, InstanceRow, LaunchPlan, PrepareMode, ProgressSink, QuickPlay,
+    SandboxSpec,
 };
 use crate::{Engine, Event, LogStream, Running};
 use chrono::Utc;
@@ -55,9 +56,10 @@ impl Engine {
         progress: &dyn ProgressSink,
         cancel: CancellationToken,
         quick_play: Option<QuickPlay>,
+        mode: PrepareMode,
     ) -> Result<LaunchPlan, EngineError> {
         let result = self
-            .prepare_vanilla(id, progress, &cancel, quick_play)
+            .prepare_vanilla(id, progress, &cancel, quick_play, mode)
             .await;
         self.emit(Event::PrepareFinished {
             id,
@@ -154,6 +156,7 @@ impl Engine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
         quick_play: Option<QuickPlay>,
+        mode: PrepareMode,
     ) -> Result<LaunchPlan, EngineError> {
         check_cancel(cancel)?;
         let _guard = self.begin_prepare(id)?;
@@ -220,13 +223,10 @@ impl Engine {
         check_cancel(cancel)?;
         progress.set("Version manifest", 0, 1);
         let manifest_path = self.paths.cache_meta.join("version_manifest_v2.json");
-        if manifest_path.exists() {
-            let _ = std::fs::remove_file(&manifest_path);
-        }
-        http.download_sha1(VERSION_MANIFEST_URL, &manifest_path, None, cancel)
+        let manifest: VersionManifest = http
+            .load_meta_json(VERSION_MANIFEST_URL, &manifest_path, mode, cancel)
             .await?;
         progress.set("Version manifest", 1, 1);
-        let manifest: VersionManifest = read_json(&manifest_path)?;
         let entry = manifest
             .versions
             .iter()
@@ -238,13 +238,26 @@ impl Engine {
         check_cancel(cancel)?;
         progress.set("Version", 0, 1);
         let version_path = self.paths.cache_meta.join(meta_json_name(&entry.id)?);
-        http.download_sha1(&entry.url, &version_path, entry.sha1.as_deref(), cancel)
-            .await?;
+        http.download_sha1(
+            &entry.url,
+            &version_path,
+            entry.sha1.as_deref(),
+            entry.size.filter(|size| *size > 0),
+            cancel,
+            mode,
+        )
+        .await?;
         progress.set("Version", 1, 1);
         let version: VersionInfo = read_json(&version_path)?;
         let mut version = match row.loader {
-            Loader::Fabric => merge_fabric_profile(&http, &row, version, progress, cancel).await?,
-            Loader::Quilt => merge_quilt_profile(&http, &row, version, progress, cancel).await?,
+            Loader::Fabric => {
+                merge_fabric_profile(&http, &self.paths, &row, version, progress, cancel, mode)
+                    .await?
+            }
+            Loader::Quilt => {
+                merge_quilt_profile(&http, &self.paths, &row, version, progress, cancel, mode)
+                    .await?
+            }
             _ => version,
         };
         let installer = match row.loader {
@@ -256,6 +269,7 @@ impl Engine {
                     row.loader_version.as_deref(),
                     progress,
                     cancel,
+                    mode,
                 )
                 .await?,
             ),
@@ -267,6 +281,7 @@ impl Engine {
                     row.loader_version.as_deref(),
                     progress,
                     cancel,
+                    mode,
                 )
                 .await?,
             ),
@@ -282,17 +297,18 @@ impl Engine {
             custom.as_deref(),
             progress,
             cancel,
+            mode,
         )
         .await?;
 
         check_cancel(cancel)?;
         progress.set("Client", 0, 1);
-        let client = fetch_client(&http, &self.paths, &version, cancel).await?;
+        let client = fetch_client(&http, &self.paths, &version, cancel, mode).await?;
         progress.set("Client", 1, 1);
 
         if let Some((profile, forge_version)) = installer {
             check_cancel(cancel)?;
-            run_processors(&java, &profile, &self.paths, &client, cancel).await?;
+            run_processors(&java, &profile, &self.paths, &client, cancel, mode).await?;
             version = merge_forge(version, forge_version);
         }
         // JNA < 5.13 aborts on macOS when dlerror() exceeds 1024 bytes
@@ -301,27 +317,23 @@ impl Engine {
 
         check_cancel(cancel)?;
         let artifacts = select_libraries(&version);
-        let lib_dests = fetch_libraries(&http, &self.paths, &artifacts, progress, cancel).await?;
+        let lib_dests =
+            fetch_libraries(&http, &self.paths, &artifacts, progress, cancel, mode).await?;
 
         check_cancel(cancel)?;
         let natives_dir = self
             .paths
             .cache_natives
             .join(natives_dir_name(&artifacts, row.sandbox));
-        std::fs::create_dir_all(&natives_dir).map_err(|e| EngineError::io(&natives_dir, e))?;
-        let native_count = artifacts.iter().filter(|a| a.extract_natives).count() as u64;
-        let mut natives_done = 0u64;
-        if native_count == 0 {
-            progress.set("Natives", 0, 0);
-        }
-        for artifact in artifacts.iter().filter(|a| a.extract_natives) {
-            check_cancel(cancel)?;
-            let jar = self.paths.cache_libraries.join(&artifact.path);
-            let exclude = exclude_for(&version, &artifact.path);
-            extract_natives(&jar, &natives_dir, &exclude)?;
-            natives_done += 1;
-            progress.set("Natives", natives_done, native_count);
-        }
+        ensure_natives(
+            &artifacts,
+            &self.paths.cache_libraries,
+            &natives_dir,
+            mode,
+            progress,
+            cancel,
+            |path| exclude_for(&version, path),
+        )?;
 
         let cwd = self.paths.instance_minecraft(&row.slug);
         std::fs::create_dir_all(&cwd).map_err(|e| EngineError::io(&cwd, e))?;
@@ -333,10 +345,12 @@ impl Engine {
                 &self.paths,
                 &idx.url,
                 &idx.sha1,
+                Some(idx.size).filter(|size| *size > 0),
                 &idx.id,
                 &cwd,
                 progress,
                 cancel,
+                mode,
             )
             .await?;
             (assets_root_path(&root), idx.id.clone())
@@ -364,7 +378,9 @@ impl Engine {
                     &client_log.file.url,
                     &dest,
                     Some(client_log.file.sha1.as_str()),
+                    Some(client_log.file.size).filter(|size| *size > 0),
                     cancel,
+                    mode,
                 )
                 .await?;
                 progress.set("Logging", 1, 1);
@@ -464,16 +480,28 @@ impl Engine {
     }
 }
 
+fn fabric_index_path(paths: &crate::LauncherPaths) -> PathBuf {
+    paths.cache_meta.join("fabric-loader-index.json")
+}
+
+fn quilt_index_path(paths: &crate::LauncherPaths) -> PathBuf {
+    paths.cache_meta.join("quilt-loader-index.json")
+}
+
 async fn merge_fabric_profile(
     http: &HttpFiles,
+    paths: &crate::LauncherPaths,
     row: &InstanceRow,
     vanilla: VersionInfo,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<VersionInfo, EngineError> {
     check_cancel(cancel)?;
     progress.set("Fabric loader", 0, 2);
-    let index: FabricLoaderIndex = http.get_json(LOADER_INDEX_URL, cancel).await?;
+    let index: FabricLoaderIndex = http
+        .load_meta_json(LOADER_INDEX_URL, &fabric_index_path(paths), mode, cancel)
+        .await?;
     let loader = match pick_loader_version(&index, row.loader_version.as_deref()) {
         Ok(version) => version,
         Err(EngineError::LoaderUnavailable { loader, .. }) => {
@@ -503,10 +531,12 @@ async fn merge_fabric_profile(
 
 async fn merge_quilt_profile(
     http: &HttpFiles,
+    paths: &crate::LauncherPaths,
     row: &InstanceRow,
     vanilla: VersionInfo,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<VersionInfo, EngineError> {
     use crate::quilt::{
         LOADER_INDEX_URL, QuiltLoaderIndex, QuiltProfile, merge_quilt, pick_loader_version,
@@ -515,7 +545,9 @@ async fn merge_quilt_profile(
 
     check_cancel(cancel)?;
     progress.set("Quilt loader", 0, 2);
-    let index: QuiltLoaderIndex = http.get_json(LOADER_INDEX_URL, cancel).await?;
+    let index: QuiltLoaderIndex = http
+        .load_meta_json(LOADER_INDEX_URL, &quilt_index_path(paths), mode, cancel)
+        .await?;
     let loader = match pick_loader_version(&index, row.loader_version.as_deref()) {
         Ok(version) => version,
         Err(EngineError::LoaderUnavailable { loader, .. }) => {
@@ -931,6 +963,8 @@ struct ManifestVersion {
     id: String,
     url: String,
     sha1: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[cfg(test)]
@@ -940,8 +974,9 @@ mod tests {
     use crate::ids::Loader;
     use crate::mojang::FeatureSet;
     use crate::store::MemoryKeychain;
-    use crate::types::{CreateInstance, ProgressSink, QuickPlay};
+    use crate::types::{CreateInstance, PrepareMode, ProgressSink, QuickPlay};
     use crate::{Engine, LauncherPaths};
+    use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
@@ -1001,12 +1036,59 @@ mod tests {
     }
 
     #[test]
+    fn fabric_index_cache_path() {
+        let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
+        assert!(
+            super::fabric_index_path(&paths).ends_with("cache/meta/fabric-loader-index.json")
+                || super::fabric_index_path(&paths)
+                    .ends_with("cache\\meta\\fabric-loader-index.json")
+        );
+    }
+
+    #[test]
+    fn quilt_index_cache_path() {
+        let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
+        assert!(
+            super::quilt_index_path(&paths).ends_with("cache/meta/quilt-loader-index.json")
+                || super::quilt_index_path(&paths)
+                    .ends_with("cache\\meta\\quilt-loader-index.json")
+        );
+    }
+
+    #[test]
     fn forge_runtime_classpath_omits_vanilla_client() {
         assert!(super::append_vanilla_client(Loader::Vanilla));
         assert!(super::append_vanilla_client(Loader::Fabric));
         assert!(super::append_vanilla_client(Loader::Quilt));
         assert!(!super::append_vanilla_client(Loader::Forge));
         assert!(!super::append_vanilla_client(Loader::NeoForge));
+    }
+
+    #[tokio::test]
+    async fn prepare_overlap_is_instance_busy() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "Busy".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        engine.preparing.lock().insert(id);
+        let err = engine
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Verify,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::InstanceBusy));
     }
 
     #[tokio::test]
@@ -1023,7 +1105,39 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::NoAccount));
+    }
+
+    #[tokio::test]
+    async fn prepare_verify_offline_errors_without_account() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "V".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Verify,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::NoAccount));
@@ -1043,7 +1157,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1073,7 +1193,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1103,7 +1229,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1133,7 +1265,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(

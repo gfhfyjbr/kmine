@@ -1,7 +1,7 @@
 use crate::error::EngineError;
 use crate::http::{DownloadJob, HttpFiles};
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
@@ -40,10 +40,12 @@ pub async fn fetch_assets(
     paths: &LauncherPaths,
     index_url: &str,
     index_sha1: &str,
+    index_size: Option<u64>,
     index_id: &str,
     game_dir: &Path,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<AssetsRoot, EngineError> {
     let index_path = paths.cache_assets_indexes.join(format!("{index_id}.json"));
     let expected = if index_sha1.is_empty() {
@@ -51,7 +53,7 @@ pub async fn fetch_assets(
     } else {
         Some(index_sha1)
     };
-    http.download_sha1(index_url, &index_path, expected, cancel)
+    http.download_sha1(index_url, &index_path, expected, index_size, cancel, mode)
         .await?;
     let bytes = std::fs::read(&index_path).map_err(|e| EngineError::io(&index_path, e))?;
     let index: AssetIndexFile = serde_json::from_slice(&bytes)
@@ -92,7 +94,8 @@ pub async fn fetch_assets(
             ));
         }
     }
-    http.download_many(jobs, "Assets", progress, cancel).await?;
+    http.download_many(jobs, "Assets", progress, cancel, mode)
+        .await?;
     for (src, dest) in copies {
         materialize(&src, &dest)?;
     }
@@ -156,7 +159,7 @@ mod tests {
     use super::fetch_assets;
     use crate::http::HttpFiles;
     use crate::paths::LauncherPaths;
-    use crate::types::ProgressSink;
+    use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use tokio_util::sync::CancellationToken;
 
@@ -208,10 +211,12 @@ mod tests {
             &paths,
             &format!("{}/index.json", server.uri()),
             &index_sha1,
+            Some(index_bytes.len() as u64),
             "legacy",
             &game_dir,
             &NoopProgress,
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap();

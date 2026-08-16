@@ -6,7 +6,7 @@ use crate::error::EngineError;
 use crate::http::{DownloadJob, HttpFiles};
 use crate::mojang::VersionInfo;
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
@@ -45,6 +45,7 @@ pub async fn resolve_java(
     custom: Option<&Path>,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<PathBuf, EngineError> {
     resolve_java_from(
         http,
@@ -54,6 +55,7 @@ pub async fn resolve_java(
         progress,
         cancel,
         JAVA_RUNTIME_ALL_JSON,
+        mode,
     )
     .await
 }
@@ -66,6 +68,7 @@ async fn resolve_java_from(
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
     all_json_url: &str,
+    mode: PrepareMode,
 ) -> Result<PathBuf, EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
@@ -83,14 +86,9 @@ async fn resolve_java_from(
     let platform = platform_id(std::env::consts::OS, std::env::consts::ARCH);
 
     let all_path = paths.cache_meta.join("java-all.json");
-    if all_path.exists() {
-        let _ = std::fs::remove_file(&all_path);
-    }
-    http.download_sha1(all_json_url, &all_path, None, cancel)
+    let all: JavaAll = http
+        .load_meta_json(all_json_url, &all_path, mode, cancel)
         .await?;
-    let bytes = std::fs::read(&all_path).map_err(|e| EngineError::io(&all_path, e))?;
-    let all: JavaAll = serde_json::from_slice(&bytes)
-        .map_err(|e| EngineError::io(&all_path, io::Error::other(e.to_string())))?;
 
     let (used_platform, entry) =
         pick_runtime(&all, &platform, component).ok_or(EngineError::JavaNotFound)?;
@@ -102,7 +100,9 @@ async fn resolve_java_from(
         &entry.manifest.url,
         &manifest_path,
         entry.manifest.sha1.as_deref(),
+        entry.manifest.size,
         cancel,
+        mode,
     )
     .await?;
     let manifest_bytes =
@@ -151,7 +151,8 @@ async fn resolve_java_from(
             RuntimeFile::Link { target } => links.push((dest, target.clone())),
         }
     }
-    http.download_many(jobs, "Java", progress, cancel).await?;
+    http.download_many(jobs, "Java", progress, cancel, mode)
+        .await?;
     for dest in executables {
         set_executable(&dest)?;
     }
@@ -314,7 +315,7 @@ mod tests {
     use crate::http::HttpFiles;
     use crate::mojang::VersionInfo;
     use crate::paths::LauncherPaths;
-    use crate::types::ProgressSink;
+    use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
@@ -382,6 +383,7 @@ mod tests {
             Some(Path::new("/no/java/here")),
             &NoopProgress,
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap_err();
@@ -452,7 +454,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
-        std::fs::write(paths.cache_meta.join("java-all.json"), b"{\"stale\":true}").unwrap();
+        // Stale body with old mtime so Warm TTL re-fetches from the mock server.
+        let all_path = paths.cache_meta.join("java-all.json");
+        std::fs::write(&all_path, b"{\"stale\":true}").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&all_path)
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(4000))
+            .unwrap();
+        drop(file);
         let java = resolve_java_from(
             &HttpFiles::new().unwrap(),
             &paths,
@@ -461,6 +472,7 @@ mod tests {
             &NoopProgress,
             &CancellationToken::new(),
             &format!("{}/all.json", server.uri()),
+            PrepareMode::Warm,
         )
         .await
         .unwrap();
