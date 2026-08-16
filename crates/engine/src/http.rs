@@ -141,9 +141,23 @@ impl HttpFiles {
         mode: PrepareMode,
         cancel: &CancellationToken,
     ) -> Result<T, EngineError> {
-        let bytes = self.load_meta_bytes(url, dest, mode, cancel).await?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| EngineError::io(dest, std::io::Error::other(e.to_string())))
+        if mode == PrepareMode::Warm && meta_is_fresh(dest, META_TTL) {
+            return parse_meta_json(dest);
+        }
+
+        match self.force_download_meta(url, dest, cancel, mode).await {
+            Ok(()) => parse_meta_json(dest),
+            Err(download_err) if mode == PrepareMode::Warm => {
+                // Prefer parseable stale disk over the download error; corrupt → download error.
+                if let Ok(bytes) = std::fs::read(dest) {
+                    if let Ok(value) = serde_json::from_slice::<T>(&bytes) {
+                        return Ok(value);
+                    }
+                }
+                Err(download_err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Download unhashed meta to a sibling path then rename over `dest`.
@@ -441,6 +455,12 @@ impl HttpFiles {
         }
         result
     }
+}
+
+fn parse_meta_json<T: DeserializeOwned>(dest: &Path) -> Result<T, EngineError> {
+    let bytes = std::fs::read(dest).map_err(|e| EngineError::io(dest, e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| EngineError::io(dest, std::io::Error::other(e.to_string())))
 }
 
 fn cache_hit(
@@ -967,5 +987,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn load_meta_json_warm_stale_corrupt_returns_download_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.json");
+        std::fs::write(&dest, b"{").unwrap();
+        let file = std::fs::File::options().write(true).open(&dest).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(4000))
+            .unwrap();
+        drop(file);
+        let err = HttpFiles::new()
+            .unwrap()
+            .load_meta_json::<serde_json::Value>(
+                &format!("{}/m", server.uri()),
+                &dest,
+                PrepareMode::Warm,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::Http { status: 500, .. }),
+            "expected download Http error, got {err:?}"
+        );
     }
 }
