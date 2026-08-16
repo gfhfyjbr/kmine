@@ -1567,6 +1567,78 @@ impl KmineApp {
         .detach();
     }
 
+    fn verify_files(&mut self, id: InstanceId, cx: &mut Context<Self>) {
+        let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
+            return;
+        };
+        if instance.running || self.progress.is_some() {
+            return;
+        }
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.progress = Some(ProgressModal {
+            id,
+            name: instance.name.clone(),
+            title: "Verifying files".into(),
+            done: 0,
+            total: 0,
+        });
+        self.status.clear();
+        cx.notify();
+        let engine = self.engine.clone();
+        let rt = self.rt.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let prepared = rt
+                .spawn(async move {
+                    let sink = EventProgressSink::new(engine.event_sender(), id);
+                    engine
+                        .prepare(id, &sink, cancel, None, PrepareMode::Verify)
+                        .await
+                        .map(|_| ())
+                })
+                .await;
+            match prepared {
+                Ok(Ok(())) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        this.status = "Files verified".into();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(err)) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        match err {
+                            EngineError::NoAccount => {
+                                this.refresh_accounts();
+                                this.show_settings = false;
+                                this.show_accounts = true;
+                                this.status = EngineError::NoAccount.to_string();
+                            }
+                            EngineError::Cancelled => this.status.clear(),
+                            other => this.status = other.to_string(),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.progress = None;
+                        this.cancel = None;
+                        this.status = err.to_string();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
     fn cancel_prepare(&mut self, cx: &mut Context<Self>) {
         if let Some(cancel) = &self.cancel {
             cancel.cancel();
@@ -2020,6 +2092,15 @@ fn right_pane(
                         move |_, _, cx| {
                             this.update(cx, |this, cx| {
                                 this.play_or_stop(id, None, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.verify_files(id, cx);
                             })
                             .ok();
                         }
