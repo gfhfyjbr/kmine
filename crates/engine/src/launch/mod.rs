@@ -224,13 +224,10 @@ impl Engine {
         check_cancel(cancel)?;
         progress.set("Version manifest", 0, 1);
         let manifest_path = self.paths.cache_meta.join("version_manifest_v2.json");
-        if manifest_path.exists() {
-            let _ = std::fs::remove_file(&manifest_path);
-        }
-        http.download_sha1(VERSION_MANIFEST_URL, &manifest_path, None, cancel, mode)
+        let manifest: VersionManifest = http
+            .load_meta_json(VERSION_MANIFEST_URL, &manifest_path, mode, cancel)
             .await?;
         progress.set("Version manifest", 1, 1);
-        let manifest: VersionManifest = read_json(&manifest_path)?;
         let entry = manifest
             .versions
             .iter()

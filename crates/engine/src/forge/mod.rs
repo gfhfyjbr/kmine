@@ -172,12 +172,11 @@ pub async fn prepare_forge(
     }
     progress.set("Forge installer", 0, 2);
     let meta_path = paths.cache_meta.join("forge-maven-metadata.xml");
-    if meta_path.exists() {
-        let _ = std::fs::remove_file(&meta_path);
-    }
-    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel, mode)
+    let xml_bytes = http
+        .load_meta_bytes(MAVEN_METADATA_URL, &meta_path, mode, cancel)
         .await?;
-    let xml = std::fs::read_to_string(&meta_path).map_err(|e| EngineError::io(&meta_path, e))?;
+    let xml = String::from_utf8(xml_bytes)
+        .map_err(|e| EngineError::io(&meta_path, io::Error::other(e.to_string())))?;
     let versions = parse_maven_versions(&xml)?;
     let ver = match pick_forge_version(mc, &versions, preferred) {
         Ok(ver) => ver,

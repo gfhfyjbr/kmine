@@ -86,14 +86,9 @@ async fn resolve_java_from(
     let platform = platform_id(std::env::consts::OS, std::env::consts::ARCH);
 
     let all_path = paths.cache_meta.join("java-all.json");
-    if all_path.exists() {
-        let _ = std::fs::remove_file(&all_path);
-    }
-    http.download_sha1(all_json_url, &all_path, None, cancel, mode)
+    let all: JavaAll = http
+        .load_meta_json(all_json_url, &all_path, mode, cancel)
         .await?;
-    let bytes = std::fs::read(&all_path).map_err(|e| EngineError::io(&all_path, e))?;
-    let all: JavaAll = serde_json::from_slice(&bytes)
-        .map_err(|e| EngineError::io(&all_path, io::Error::other(e.to_string())))?;
 
     let (used_platform, entry) =
         pick_runtime(&all, &platform, component).ok_or(EngineError::JavaNotFound)?;
@@ -458,7 +453,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = LauncherPaths::new(root.path().to_path_buf());
         paths.create_dirs().unwrap();
-        std::fs::write(paths.cache_meta.join("java-all.json"), b"{\"stale\":true}").unwrap();
+        // Stale body with old mtime so Warm TTL re-fetches from the mock server.
+        let all_path = paths.cache_meta.join("java-all.json");
+        std::fs::write(&all_path, b"{\"stale\":true}").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&all_path)
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(4000))
+            .unwrap();
+        drop(file);
         let java = resolve_java_from(
             &HttpFiles::new().unwrap(),
             &paths,

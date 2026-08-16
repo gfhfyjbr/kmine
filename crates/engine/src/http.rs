@@ -21,6 +21,24 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(150);
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 64;
 const MAX_DOWNLOAD_CONCURRENCY: usize = 128;
 
+pub const META_TTL: Duration = Duration::from_secs(3600);
+
+pub fn meta_is_fresh(path: &Path, ttl: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match mtime.elapsed() {
+        Ok(age) => age < ttl,
+        Err(_) => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct HttpFiles {
     pub client: reqwest::Client,
@@ -93,6 +111,73 @@ impl HttpFiles {
             mode,
         )
         .await
+    }
+
+    pub async fn load_meta_bytes(
+        &self,
+        url: &str,
+        dest: &Path,
+        mode: PrepareMode,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, EngineError> {
+        if mode == PrepareMode::Warm && meta_is_fresh(dest, META_TTL) {
+            return std::fs::read(dest).map_err(|e| EngineError::io(dest, e));
+        }
+
+        match self.force_download_meta(url, dest, cancel, mode).await {
+            Ok(()) => std::fs::read(dest).map_err(|e| EngineError::io(dest, e)),
+            Err(err) if mode == PrepareMode::Warm => match std::fs::read(dest) {
+                Ok(bytes) => Ok(bytes),
+                Err(_) => Err(err),
+            },
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn load_meta_json<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        dest: &Path,
+        mode: PrepareMode,
+        cancel: &CancellationToken,
+    ) -> Result<T, EngineError> {
+        let bytes = self.load_meta_bytes(url, dest, mode, cancel).await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| EngineError::io(dest, std::io::Error::other(e.to_string())))
+    }
+
+    /// Download unhashed meta to a sibling path then rename over `dest`.
+    /// Avoids `cache_hit` on existing unhashed files and keeps `dest` on failure.
+    async fn force_download_meta(
+        &self,
+        url: &str,
+        dest: &Path,
+        cancel: &CancellationToken,
+        mode: PrepareMode,
+    ) -> Result<(), EngineError> {
+        let tmp = dest.with_extension("meta-new");
+        if tmp.exists() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        match self.download_sha1(url, &tmp, None, cancel, mode).await {
+            Ok(()) => {
+                if let Some(parent) = dest.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .map_err(|e| EngineError::io(parent, e))?;
+                    }
+                }
+                tokio::fs::rename(&tmp, dest)
+                    .await
+                    .map_err(|e| EngineError::io(dest, e))?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                Err(err)
+            }
+        }
     }
 
     pub async fn download_many(
@@ -502,11 +587,12 @@ fn reqwest_error(url: &str, err: reqwest::Error) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DownloadJob, HttpFiles, cache_hit, schedule_jobs};
+    use super::{DownloadJob, HttpFiles, cache_hit, meta_is_fresh, schedule_jobs};
     use crate::error::EngineError;
     use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use std::path::Path;
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
@@ -791,5 +877,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[test]
+    fn meta_is_fresh_respects_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.json");
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(meta_is_fresh(&path, Duration::from_secs(3600)));
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(3601))
+            .unwrap();
+        assert!(!meta_is_fresh(&path, Duration::from_secs(3600)));
+    }
+
+    #[tokio::test]
+    async fn load_meta_json_warm_fresh_zero_http() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.json");
+        std::fs::write(&dest, br#"{"ok":true}"#).unwrap();
+        let v: serde_json::Value = HttpFiles::new()
+            .unwrap()
+            .load_meta_json(
+                &format!("{}/m", server.uri()),
+                &dest,
+                PrepareMode::Warm,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn load_meta_json_verify_always_fetches() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_raw(br#"{"ok":false}"#, "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.json");
+        std::fs::write(&dest, br#"{"ok":true}"#).unwrap();
+        let v: serde_json::Value = HttpFiles::new()
+            .unwrap()
+            .load_meta_json(
+                &format!("{}/m", server.uri()),
+                &dest,
+                PrepareMode::Verify,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn load_meta_json_warm_stale_falls_back_when_download_fails() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("m.json");
+        std::fs::write(&dest, br#"{"ok":true}"#).unwrap();
+        let file = std::fs::File::options().write(true).open(&dest).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(4000))
+            .unwrap();
+        drop(file);
+        let v: serde_json::Value = HttpFiles::new()
+            .unwrap()
+            .load_meta_json(
+                &format!("{}/m", server.uri()),
+                &dest,
+                PrepareMode::Warm,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(v["ok"], true);
     }
 }
