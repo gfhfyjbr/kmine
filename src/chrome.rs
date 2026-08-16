@@ -452,7 +452,11 @@ pub fn filled_segment(
 
 pub const FILES_VERIFIED: &str = "Files verified";
 
-pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
+pub fn status_alert(
+    message: &str,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
     if is_busy_status(message) {
         div()
             .text_sm()
@@ -460,9 +464,13 @@ pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
             .child(message.to_string())
             .into_any_element()
     } else if is_success_status(message) {
-        Alert::success("status-ok", message.to_string()).into_any_element()
+        Alert::success("status-ok", message.to_string())
+            .on_close(on_close)
+            .into_any_element()
     } else {
-        Alert::error("status-error", message.to_string()).into_any_element()
+        Alert::error("status-error", message.to_string())
+            .on_close(on_close)
+            .into_any_element()
     }
 }
 

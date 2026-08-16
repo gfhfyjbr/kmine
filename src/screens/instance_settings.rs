@@ -122,6 +122,7 @@ pub fn settings_tab(
     sandbox_status: &SandboxStatus,
     status: &str,
     on_sandbox: impl Fn(bool, &mut Window, &mut App) + 'static,
+    on_dismiss_status: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let sandbox_available = matches!(sandbox_status, SandboxStatus::Available);
@@ -220,7 +221,7 @@ pub fn settings_tab(
                 ),
         )
         .when(!status.is_empty(), |this| {
-            this.child(status_alert(status, cx))
+            this.child(status_alert(status, on_dismiss_status, cx))
         })
 }
 

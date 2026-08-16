@@ -19,7 +19,9 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::chrome::{empty_panel, filled_segment, motion, status_alert, FILES_VERIFIED};
+use crate::chrome::{
+    empty_panel, filled_segment, is_success_status, motion, status_alert, FILES_VERIFIED,
+};
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
@@ -61,6 +63,7 @@ pub struct KmineApp {
     show_settings: bool,
     status: String,
     status_for: Option<InstanceId>,
+    status_epoch: u64,
     create: Option<CreateInstanceForm>,
     catalog: Option<CatalogModal>,
     search_gen: u64,
@@ -105,6 +108,7 @@ impl KmineApp {
             show_settings: false,
             status: String::new(),
             status_for: None,
+            status_epoch: 0,
             create: None,
             catalog: None,
             search_gen: 0,
@@ -193,6 +197,34 @@ impl KmineApp {
     fn clear_status(&mut self) {
         self.status.clear();
         self.status_for = None;
+        self.status_epoch = self.status_epoch.wrapping_add(1);
+    }
+
+    fn dismiss_status(&mut self, cx: &mut Context<Self>) {
+        self.clear_status();
+        cx.notify();
+    }
+
+    fn arm_success_status_timeout(&mut self, cx: &mut Context<Self>) {
+        if !is_success_status(&self.status) {
+            return;
+        }
+        self.status_epoch = self.status_epoch.wrapping_add(1);
+        let epoch = self.status_epoch;
+        let rt = self.rt.clone();
+        cx.spawn(async move |this, cx| {
+            rt.spawn(async { tokio::time::sleep(Duration::from_secs(4)).await })
+                .await
+                .ok();
+            this.update(cx, |this, cx| {
+                if this.status_epoch == epoch {
+                    this.clear_status();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_status(&mut self, message: impl Into<String>) {
@@ -215,6 +247,9 @@ impl KmineApp {
     fn select_instance(&mut self, id: InstanceId, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selected == Some(id) {
             return;
+        }
+        if is_success_status(&self.status) {
+            self.clear_status();
         }
         self.pane_from = self.instance_pane;
         self.instance_pane = InstancePane::Play;
@@ -1627,6 +1662,7 @@ impl KmineApp {
                         this.progress = None;
                         this.cancel = None;
                         this.set_instance_status(id, FILES_VERIFIED);
+                        this.arm_success_status_timeout(cx);
                         cx.notify();
                     })
                     .ok();
@@ -2190,7 +2226,18 @@ fn tab_body(
         .gap_4()
                 .when(
                     !status.is_empty() && pane != InstancePane::Settings,
-                    |this| this.child(status_alert(status, cx)),
+                    |el| {
+                        el.child(status_alert(
+                            status,
+                            {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
+                                }
+                            },
+                            cx,
+                        ))
+                    },
                 )
                 .child(match pane {
                     InstancePane::Play => instance_play::play_tab(
@@ -2274,6 +2321,12 @@ fn tab_body(
                                             this.set_sandbox(enabled, cx);
                                         })
                                         .ok();
+                                    }
+                                },
+                                {
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
                                     }
                                 },
                                 cx,
