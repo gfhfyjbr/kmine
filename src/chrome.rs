@@ -450,6 +450,8 @@ pub fn filled_segment(
         )
 }
 
+pub const FILES_VERIFIED: &str = "Files verified";
+
 pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
     if is_busy_status(message) {
         div()
@@ -457,6 +459,8 @@ pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
             .text_color(cx.theme().muted_foreground)
             .child(message.to_string())
             .into_any_element()
+    } else if is_success_status(message) {
+        Alert::success("status-ok", message.to_string()).into_any_element()
     } else {
         Alert::error("status-error", message.to_string()).into_any_element()
     }
@@ -464,6 +468,10 @@ pub fn status_alert(message: &str, cx: &App) -> impl IntoElement {
 
 pub fn is_busy_status(status: &str) -> bool {
     status.ends_with('…') || status.ends_with("...")
+}
+
+pub fn is_success_status(status: &str) -> bool {
+    status == FILES_VERIFIED
 }
 
 pub fn loader_label(loader: Loader) -> &'static str {
@@ -510,5 +518,17 @@ pub fn format_last_played(ms: Option<i64>) -> String {
         format!("{}d ago", secs / 86_400)
     } else {
         format!("{}w ago", secs / (86_400 * 7))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FILES_VERIFIED, is_busy_status, is_success_status};
+
+    #[test]
+    fn files_verified_is_success_not_busy() {
+        assert!(is_success_status(FILES_VERIFIED));
+        assert!(!is_busy_status(FILES_VERIFIED));
+        assert!(!is_success_status("instance not found"));
     }
 }

@@ -19,7 +19,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::chrome::{empty_panel, filled_segment, motion, status_alert};
+use crate::chrome::{empty_panel, filled_segment, motion, status_alert, FILES_VERIFIED};
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
@@ -1602,7 +1602,7 @@ impl KmineApp {
                     this.update(cx, |this, cx| {
                         this.progress = None;
                         this.cancel = None;
-                        this.status = "Files verified".into();
+                        this.status = FILES_VERIFIED.into();
                         cx.notify();
                     })
                     .ok();
