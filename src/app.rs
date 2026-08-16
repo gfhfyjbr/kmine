@@ -24,7 +24,7 @@ use crate::providers::CurseForgeProvider;
 use kmine_engine::{
     AccountId, CancellationToken, CatalogError, CatalogFileFilter, CatalogProject,
     CatalogProjectDetail, CatalogProjectId, CatalogQuery, CatalogSort, ContentClass, ContentEntry,
-    ContentFolder, Engine, EngineError, Event, InstanceId, InstanceSummary, Loader,
+    ContentFolder, Engine, EngineError, Event, InstanceId, InstanceSummary, Loader, PrepareMode,
     QuickPlay, QuickPlayLists, SandboxStatus,
 };
 
@@ -1516,7 +1516,9 @@ impl KmineApp {
             let prepared = rt
                 .spawn(async move {
                     let sink = EventProgressSink::new(engine.event_sender(), id);
-                    let plan = engine.prepare(id, &sink, cancel, quick_play).await?;
+                    let plan = engine
+                        .prepare(id, &sink, cancel, quick_play, PrepareMode::Warm)
+                        .await?;
                     engine.spawn(id, plan)
                 })
                 .await;

@@ -19,7 +19,8 @@ use crate::now_ms;
 use crate::redact::redact_line_with_tokens;
 use crate::store::Store;
 use crate::types::{
-    AccountRecord, GameProcessId, InstanceRow, LaunchPlan, ProgressSink, QuickPlay, SandboxSpec,
+    AccountRecord, GameProcessId, InstanceRow, LaunchPlan, PrepareMode, ProgressSink, QuickPlay,
+    SandboxSpec,
 };
 use crate::{Engine, Event, LogStream, Running};
 use chrono::Utc;
@@ -55,9 +56,10 @@ impl Engine {
         progress: &dyn ProgressSink,
         cancel: CancellationToken,
         quick_play: Option<QuickPlay>,
+        mode: PrepareMode,
     ) -> Result<LaunchPlan, EngineError> {
         let result = self
-            .prepare_vanilla(id, progress, &cancel, quick_play)
+            .prepare_vanilla(id, progress, &cancel, quick_play, mode)
             .await;
         self.emit(Event::PrepareFinished {
             id,
@@ -154,7 +156,9 @@ impl Engine {
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
         quick_play: Option<QuickPlay>,
+        mode: PrepareMode,
     ) -> Result<LaunchPlan, EngineError> {
+        let _ = mode;
         check_cancel(cancel)?;
         let _guard = self.begin_prepare(id)?;
 
@@ -940,7 +944,7 @@ mod tests {
     use crate::ids::Loader;
     use crate::mojang::FeatureSet;
     use crate::store::MemoryKeychain;
-    use crate::types::{CreateInstance, ProgressSink, QuickPlay};
+    use crate::types::{CreateInstance, PrepareMode, ProgressSink, QuickPlay};
     use crate::{Engine, LauncherPaths};
     use tokio_util::sync::CancellationToken;
 
@@ -1023,7 +1027,39 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::NoAccount));
+    }
+
+    #[tokio::test]
+    async fn prepare_verify_offline_errors_without_account() {
+        let engine = test_engine().await;
+        let id = engine
+            .create_instance(CreateInstance {
+                name: "V".into(),
+                minecraft_version: "1.21.1".into(),
+                loader: Loader::Vanilla,
+                loader_version: None,
+                icon_png: None,
+            })
+            .await
+            .unwrap();
+        let err = engine
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Verify,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::NoAccount));
@@ -1043,7 +1079,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1073,7 +1115,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1103,7 +1151,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1133,7 +1187,13 @@ mod tests {
             .await
             .unwrap();
         let err = engine
-            .prepare(id, &NoopProgress, CancellationToken::new(), None)
+            .prepare(
+                id,
+                &NoopProgress,
+                CancellationToken::new(),
+                None,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(

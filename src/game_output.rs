@@ -11,7 +11,9 @@ use gpui_component::{
     dialog::Cancel,
     h_flex, v_flex,
 };
-use kmine_engine::{CancellationToken, Engine, EngineError, Event, InstanceId, LogStream};
+use kmine_engine::{
+    CancellationToken, Engine, EngineError, Event, InstanceId, LogStream, PrepareMode,
+};
 
 use crate::chrome::{cta, running_pill};
 use crate::modals::progress::EventProgressSink;
@@ -183,7 +185,7 @@ impl GameOutput {
                 .spawn(async move {
                     let sink = EventProgressSink::new(engine.event_sender(), id);
                     let plan = engine
-                        .prepare(id, &sink, CancellationToken::new(), None)
+                        .prepare(id, &sink, CancellationToken::new(), None, PrepareMode::Warm)
                         .await?;
                     engine.spawn(id, plan)
                 })

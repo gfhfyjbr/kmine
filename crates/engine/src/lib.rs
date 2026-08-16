@@ -36,7 +36,7 @@ pub use store::{Keychain, MemoryKeychain, OsKeychain};
 pub use tokio_util::sync::CancellationToken;
 pub use types::{
     AccountRecord, AccountSummary, ContentEntry, ContentFolder, CreateInstance, GameProcessId,
-    InstancePatch, InstanceRow, InstanceSummary, LaunchPlan, ProgressSink, QuickPlay,
+    InstancePatch, InstanceRow, InstanceSummary, LaunchPlan, PrepareMode, ProgressSink, QuickPlay,
     QuickPlayLists, QuickPlayServer, QuickPlayWorld, SandboxSpec, SandboxStatus,
 };
 

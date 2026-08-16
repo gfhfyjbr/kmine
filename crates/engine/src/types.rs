@@ -172,6 +172,12 @@ pub struct QuickPlayServer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameProcessId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareMode {
+    Warm,
+    Verify,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub java: PathBuf,
