@@ -32,7 +32,7 @@ use crate::modals::accounts::{self, AccountsModal};
 use crate::modals::catalog::{self, CatalogModal, CatalogTarget};
 use crate::modals::confirm;
 use crate::modals::create_instance::{self, CreateInstanceForm};
-use crate::modals::progress::{self, EventProgressSink, ProgressModal};
+use crate::modals::progress::{self, EventProgressSink, ProgressModal, VERIFY_HEADING};
 use crate::modals::settings;
 use crate::screens::{instance_content, instance_play, instance_settings, instances};
 use crate::smooth_scroll::SmoothScroll;
@@ -1113,7 +1113,7 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id: progress_id,
-            name: name.clone(),
+            heading: format!("Preparing {name}"),
             title: "Installing…".into(),
             done: 0,
             total: 0,
@@ -1501,7 +1501,7 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id,
-            name: instance.name.clone(),
+            heading: format!("Preparing {}", instance.name),
             title: "Preparing…".into(),
             done: 0,
             total: 0,
@@ -1578,8 +1578,8 @@ impl KmineApp {
         self.cancel = Some(cancel.clone());
         self.progress = Some(ProgressModal {
             id,
-            name: instance.name.clone(),
-            title: "Verifying files".into(),
+            heading: VERIFY_HEADING.into(),
+            title: VERIFY_HEADING.into(),
             done: 0,
             total: 0,
         });
@@ -1823,6 +1823,9 @@ impl Render for KmineApp {
                                         self.settings.as_ref(),
                                         &sandbox_status,
                                         self.progress.as_ref().is_some_and(|p| p.id == instance.id),
+                                        self.progress.as_ref().is_some_and(|p| {
+                                            p.id == instance.id && p.heading == VERIFY_HEADING
+                                        }),
                                         self.progress.is_none(),
                                         &self.play_scroll,
                                         &self.content_scroll,
@@ -2054,6 +2057,7 @@ fn right_pane(
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
     preparing: bool,
+    verifying: bool,
     add_enabled: bool,
     play_scroll: &SmoothScroll,
     content_scroll: &SmoothScroll,
@@ -2087,6 +2091,7 @@ fn right_pane(
                 .child(instance_play::launch_hero(
                     instance,
                     preparing,
+                    verifying,
                     {
                         let this = this.clone();
                         move |_, _, cx| {

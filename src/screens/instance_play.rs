@@ -66,12 +66,15 @@ pub fn play_tab(
 pub fn launch_hero(
     instance: &InstanceSummary,
     preparing: bool,
+    verifying: bool,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_verify: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let running = instance.running;
-    let (label, icon) = if preparing {
+    let (label, icon) = if verifying {
+        ("Verifying", IconName::Loader)
+    } else if preparing {
         ("Preparing", IconName::Loader)
     } else if running {
         ("Stop", IconName::Pause)
@@ -144,9 +147,7 @@ pub fn launch_hero(
                         .when(!running, |this| this.primary())
                         .disabled(preparing)
                         .loading(preparing)
-                        .when(preparing, |this| {
-                            this.icon(IconName::Loader).label("Preparing")
-                        })
+                        .when(preparing, |this| this.icon(IconName::Loader).label(label))
                         .when(!preparing, |this| {
                             this.child(
                                 h_flex()

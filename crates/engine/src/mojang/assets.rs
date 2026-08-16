@@ -40,6 +40,7 @@ pub async fn fetch_assets(
     paths: &LauncherPaths,
     index_url: &str,
     index_sha1: &str,
+    index_size: Option<u64>,
     index_id: &str,
     game_dir: &Path,
     progress: &dyn ProgressSink,
@@ -52,7 +53,7 @@ pub async fn fetch_assets(
     } else {
         Some(index_sha1)
     };
-    http.download_sha1(index_url, &index_path, expected, cancel, mode)
+    http.download_sha1(index_url, &index_path, expected, index_size, cancel, mode)
         .await?;
     let bytes = std::fs::read(&index_path).map_err(|e| EngineError::io(&index_path, e))?;
     let index: AssetIndexFile = serde_json::from_slice(&bytes)
@@ -210,6 +211,7 @@ mod tests {
             &paths,
             &format!("{}/index.json", server.uri()),
             &index_sha1,
+            Some(index_bytes.len() as u64),
             "legacy",
             &game_dir,
             &NoopProgress,

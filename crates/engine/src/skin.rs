@@ -35,7 +35,7 @@ impl Engine {
             .paths
             .cache_skins
             .join(format!("{}.skin.png", id.0.as_simple()));
-        http.download_sha1(&url, &raw_path, None, &cancel, PrepareMode::Warm)
+        http.download_sha1(&url, &raw_path, None, None, &cancel, PrepareMode::Warm)
             .await?;
         let bytes = std::fs::read(&raw_path).map_err(|e| EngineError::io(&raw_path, e))?;
         let face = extract_face(&bytes).map_err(|e| EngineError::io(&raw_path, e))?;

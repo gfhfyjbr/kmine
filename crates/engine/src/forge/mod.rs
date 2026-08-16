@@ -200,7 +200,7 @@ pub async fn prepare_forge(
     let sha1_path = installer_path.with_extension("jar.sha1");
     let sha1 = fetch_installer_sha1(http, &url, &sha1_path, cancel, mode).await?;
     match http
-        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel, mode)
+        .download_sha1(&url, &installer_path, sha1.as_deref(), None, cancel, mode)
         .await
     {
         Err(EngineError::Http { status: 404, .. }) => {
@@ -229,7 +229,10 @@ pub(crate) async fn fetch_installer_sha1(
     mode: PrepareMode,
 ) -> Result<Option<String>, EngineError> {
     let url = format!("{installer_url}.sha1");
-    match http.download_sha1(&url, dest, None, cancel, mode).await {
+    match http
+        .download_sha1(&url, dest, None, None, cancel, mode)
+        .await
+    {
         Ok(()) => {
             let text = std::fs::read_to_string(dest).map_err(|e| EngineError::io(dest, e))?;
             let hash = text

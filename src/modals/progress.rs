@@ -3,9 +3,11 @@ use gpui::{div, px, App, ClickEvent, FontWeight, IntoElement, ParentElement, Sty
 use gpui_component::{button::Button, h_flex, progress::Progress, v_flex, ActiveTheme, Sizable};
 use kmine_engine::{Event, InstanceId, ProgressSink};
 
+pub const VERIFY_HEADING: &str = "Verifying files";
+
 pub struct ProgressModal {
     pub id: InstanceId,
-    pub name: String,
+    pub heading: String,
     pub title: String,
     pub done: u64,
     pub total: u64,
@@ -89,7 +91,7 @@ pub fn render(
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_ellipsis()
-                                        .child(format!("Preparing {}", modal.name)),
+                                        .child(modal.heading.clone()),
                                 )
                                 .when(!percent.is_empty(), |this| {
                                     this.child(

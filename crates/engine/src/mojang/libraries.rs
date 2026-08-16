@@ -133,6 +133,7 @@ pub fn ensure_natives(
     natives_dir: &Path,
     mode: PrepareMode,
     progress: &dyn ProgressSink,
+    cancel: &CancellationToken,
     mut exclude_for: impl FnMut(&str) -> Vec<String>,
 ) -> Result<(), EngineError> {
     let hex = natives_stamp_hex(artifacts);
@@ -155,6 +156,9 @@ pub fn ensure_natives(
     }
     let mut natives_done = 0u64;
     for artifact in artifacts.iter().filter(|a| a.extract_natives) {
+        if cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
         let jar = libraries_dir.join(&artifact.path);
         let exclude = exclude_for(&artifact.path);
         extract_natives(&jar, natives_dir, &exclude)?;
@@ -162,6 +166,9 @@ pub fn ensure_natives(
         progress.set("Natives", natives_done, native_count);
     }
 
+    if cancel.is_cancelled() {
+        return Err(EngineError::Cancelled);
+    }
     write_natives_stamp(natives_dir, &hex)?;
     Ok(())
 }
@@ -227,8 +234,15 @@ pub async fn fetch_client(
         .join("minecraft")
         .join(&version.id)
         .join(format!("minecraft-{}-client.jar", version.id));
-    http.download_sha1(&client.url, &dest, Some(&client.sha1), cancel, mode)
-        .await?;
+    http.download_sha1(
+        &client.url,
+        &dest,
+        Some(&client.sha1),
+        Some(client.size).filter(|size| *size > 0),
+        cancel,
+        mode,
+    )
+    .await?;
     Ok(dest)
 }
 
@@ -271,6 +285,7 @@ mod tests {
     use crate::mojang::rules::current_os_name;
     use crate::types::{PrepareMode, ProgressSink};
     use std::io::Write;
+    use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
     impl ProgressSink for NoopProgress {
@@ -394,6 +409,7 @@ mod tests {
             &natives,
             PrepareMode::Warm,
             &NoopProgress,
+            &CancellationToken::new(),
             |_| {
                 panic!("extract should not run");
             },
@@ -421,6 +437,7 @@ mod tests {
             &natives,
             PrepareMode::Verify,
             &NoopProgress,
+            &CancellationToken::new(),
             |_| Vec::new(),
         )
         .unwrap_err();
@@ -447,10 +464,41 @@ mod tests {
             &natives,
             PrepareMode::Verify,
             &NoopProgress,
+            &CancellationToken::new(),
             |_| vec![],
         )
         .unwrap_err();
         let _ = err;
         assert!(!natives_stamp_valid(&natives, "abc123"));
+    }
+
+    #[test]
+    fn ensure_natives_cancel_does_not_write_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let natives = dir.path().join("natives");
+        std::fs::create_dir_all(&natives).unwrap();
+        let artifacts = vec![LibraryArtifact {
+            path: "natives/foo.jar".into(),
+            url: String::new(),
+            sha1: None,
+            size: None,
+            extract_natives: true,
+        }];
+        let hex = natives_stamp_hex(&artifacts);
+        write_natives_stamp(&natives, &hex).unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = ensure_natives(
+            &artifacts,
+            dir.path(),
+            &natives,
+            PrepareMode::Verify,
+            &NoopProgress,
+            &cancel,
+            |_| Vec::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::error::EngineError::Cancelled));
+        assert!(!natives_stamp_valid(&natives, &hex));
     }
 }

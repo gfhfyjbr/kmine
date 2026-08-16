@@ -117,7 +117,7 @@ pub async fn prepare_neoforge(
     let sha1_path = installer_path.with_extension("jar.sha1");
     let sha1 = forge::fetch_installer_sha1(http, &url, &sha1_path, cancel, mode).await?;
     match http
-        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel, mode)
+        .download_sha1(&url, &installer_path, sha1.as_deref(), None, cancel, mode)
         .await
     {
         Err(EngineError::Http { status: 404, .. }) => {

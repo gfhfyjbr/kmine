@@ -158,7 +158,6 @@ impl Engine {
         quick_play: Option<QuickPlay>,
         mode: PrepareMode,
     ) -> Result<LaunchPlan, EngineError> {
-        let _ = mode;
         check_cancel(cancel)?;
         let _guard = self.begin_prepare(id)?;
 
@@ -243,6 +242,7 @@ impl Engine {
             &entry.url,
             &version_path,
             entry.sha1.as_deref(),
+            entry.size.filter(|size| *size > 0),
             cancel,
             mode,
         )
@@ -331,6 +331,7 @@ impl Engine {
             &natives_dir,
             mode,
             progress,
+            cancel,
             |path| exclude_for(&version, path),
         )?;
 
@@ -344,6 +345,7 @@ impl Engine {
                 &self.paths,
                 &idx.url,
                 &idx.sha1,
+                Some(idx.size).filter(|size| *size > 0),
                 &idx.id,
                 &cwd,
                 progress,
@@ -376,6 +378,7 @@ impl Engine {
                     &client_log.file.url,
                     &dest,
                     Some(client_log.file.sha1.as_str()),
+                    Some(client_log.file.size).filter(|size| *size > 0),
                     cancel,
                     mode,
                 )
@@ -960,6 +963,8 @@ struct ManifestVersion {
     id: String,
     url: String,
     sha1: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1034,8 +1039,7 @@ mod tests {
     fn fabric_index_cache_path() {
         let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
         assert!(
-            super::fabric_index_path(&paths)
-                .ends_with("cache/meta/fabric-loader-index.json")
+            super::fabric_index_path(&paths).ends_with("cache/meta/fabric-loader-index.json")
                 || super::fabric_index_path(&paths)
                     .ends_with("cache\\meta\\fabric-loader-index.json")
         );
@@ -1045,8 +1049,7 @@ mod tests {
     fn quilt_index_cache_path() {
         let paths = LauncherPaths::new(PathBuf::from("/data/kmine"));
         assert!(
-            super::quilt_index_path(&paths)
-                .ends_with("cache/meta/quilt-loader-index.json")
+            super::quilt_index_path(&paths).ends_with("cache/meta/quilt-loader-index.json")
                 || super::quilt_index_path(&paths)
                     .ends_with("cache\\meta\\quilt-loader-index.json")
         );

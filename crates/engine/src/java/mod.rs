@@ -100,6 +100,7 @@ async fn resolve_java_from(
         &entry.manifest.url,
         &manifest_path,
         entry.manifest.sha1.as_deref(),
+        entry.manifest.size,
         cancel,
         mode,
     )

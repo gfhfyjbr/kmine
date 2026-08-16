@@ -96,6 +96,7 @@ impl HttpFiles {
         url: &str,
         dest: &Path,
         expected_sha1: Option<&str>,
+        expected_size: Option<u64>,
         cancel: &CancellationToken,
         mode: PrepareMode,
     ) -> Result<(), EngineError> {
@@ -104,7 +105,7 @@ impl HttpFiles {
                 url: url.to_string(),
                 dest: dest.to_path_buf(),
                 sha1: expected_sha1.map(str::to_string),
-                size: None,
+                size: expected_size.filter(|size| *size > 0),
             },
             cancel,
             None,
@@ -173,7 +174,10 @@ impl HttpFiles {
         if tmp.exists() {
             let _ = tokio::fs::remove_file(&tmp).await;
         }
-        match self.download_sha1(url, &tmp, None, cancel, mode).await {
+        match self
+            .download_sha1(url, &tmp, None, None, cancel, mode)
+            .await
+        {
             Ok(()) => {
                 if let Some(parent) = dest.parent() {
                     if !parent.as_os_str().is_empty() {
@@ -208,6 +212,31 @@ impl HttpFiles {
             progress.set(title, 0, 0);
             return Ok(());
         }
+
+        let jobs = if mode == PrepareMode::Warm {
+            let cancel_bg = cancel.clone();
+            let (all_hit, jobs) = spawn_blocking_io(Path::new("download"), move || {
+                let mut all_hit = true;
+                for job in &jobs {
+                    if cancel_bg.is_cancelled() {
+                        return Err(EngineError::Cancelled);
+                    }
+                    if !cache_hit(&job.dest, job.sha1.as_deref(), job.size, PrepareMode::Warm)? {
+                        all_hit = false;
+                        break;
+                    }
+                }
+                Ok((all_hit, jobs))
+            })
+            .await?;
+            if all_hit {
+                progress.set(title, file_total, file_total);
+                return Ok(());
+            }
+            jobs
+        } else {
+            jobs
+        };
 
         let total_bytes = jobs
             .iter()
@@ -612,12 +641,34 @@ mod tests {
     use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use std::path::Path;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     struct NoopProgress;
     impl ProgressSink for NoopProgress {
         fn set(&self, _title: &str, _done: u64, _total: u64) {}
+    }
+
+    struct RecordingProgress {
+        events: Mutex<Vec<(String, u64, u64)>>,
+    }
+
+    impl RecordingProgress {
+        fn new() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ProgressSink for RecordingProgress {
+        fn set(&self, title: &str, done: u64, total: u64) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((title.to_string(), done, total));
+        }
     }
 
     fn sha1_hex(bytes: &[u8]) -> String {
@@ -683,6 +734,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_download_sha1_size_hit_makes_zero_http() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f.bin");
+        std::fs::write(&dest, b"abc").unwrap();
+        HttpFiles::new()
+            .unwrap()
+            .download_sha1(
+                &format!("{}/f", server.uri()),
+                &dest,
+                Some("ffffffff"),
+                Some(3),
+                &CancellationToken::new(),
+                PrepareMode::Warm,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn warm_all_hit_batch_reports_once() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let jobs: Vec<DownloadJob> = (0..3)
+            .map(|i| {
+                let dest = dir.path().join(format!("f{i}.bin"));
+                std::fs::write(&dest, b"abc").unwrap();
+                DownloadJob {
+                    url: format!("{}/f{i}", server.uri()),
+                    dest,
+                    sha1: Some("ffffffff".into()),
+                    size: Some(3),
+                }
+            })
+            .collect();
+        let progress = RecordingProgress::new();
+        HttpFiles::new()
+            .unwrap()
+            .download_many(
+                jobs,
+                "Files",
+                &progress,
+                &CancellationToken::new(),
+                PrepareMode::Warm,
+            )
+            .await
+            .unwrap();
+        let events = progress.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("Files".into(), 3, 3)]);
+    }
+
+    #[tokio::test]
     async fn downloads_and_verifies_sha1() {
         let server = wiremock::MockServer::start().await;
         let body = b"abc";
@@ -700,6 +813,7 @@ mod tests {
             &format!("{}/f", server.uri()),
             &dest,
             Some(&hash),
+            None,
             &CancellationToken::new(),
             PrepareMode::Verify,
         )
@@ -726,6 +840,7 @@ mod tests {
             &format!("{}/f", server.uri()),
             &dest,
             Some(&hash),
+            None,
             &CancellationToken::new(),
             PrepareMode::Verify,
         )
@@ -752,6 +867,7 @@ mod tests {
                 &format!("{}/f", server.uri()),
                 &dest,
                 Some("deadbeef"),
+                None,
                 &CancellationToken::new(),
                 PrepareMode::Verify,
             )
@@ -769,6 +885,7 @@ mod tests {
             .download_sha1(
                 "http://127.0.0.1:1/",
                 Path::new("/tmp/x"),
+                None,
                 None,
                 &cancel,
                 PrepareMode::Warm,
@@ -891,6 +1008,7 @@ mod tests {
                 &format!("{}/r", server.uri()),
                 &dest,
                 Some(&hash),
+                None,
                 &CancellationToken::new(),
                 PrepareMode::Verify,
             )
