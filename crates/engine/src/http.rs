@@ -1,5 +1,5 @@
 use crate::error::EngineError;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use serde::de::DeserializeOwned;
 use sha1::{Digest, Sha1};
 use std::collections::HashSet;
@@ -79,6 +79,7 @@ impl HttpFiles {
         dest: &Path,
         expected_sha1: Option<&str>,
         cancel: &CancellationToken,
+        mode: PrepareMode,
     ) -> Result<(), EngineError> {
         self.download_job(
             &DownloadJob {
@@ -89,6 +90,7 @@ impl HttpFiles {
             },
             cancel,
             None,
+            mode,
         )
         .await
     }
@@ -99,6 +101,7 @@ impl HttpFiles {
         title: &str,
         progress: &dyn ProgressSink,
         cancel: &CancellationToken,
+        mode: PrepareMode,
     ) -> Result<(), EngineError> {
         let jobs = schedule_jobs(jobs);
         let file_total = jobs.len() as u64;
@@ -135,7 +138,7 @@ impl HttpFiles {
                         EngineError::io(job.dest.clone(), std::io::Error::other(err.to_string()))
                     })?,
                 };
-                http.download_job(&job, &cancel, Some(meter)).await
+                http.download_job(&job, &cancel, Some(meter), mode).await
             });
         }
 
@@ -209,6 +212,7 @@ impl HttpFiles {
         job: &DownloadJob,
         cancel: &CancellationToken,
         meter: Option<ByteMeter>,
+        mode: PrepareMode,
     ) -> Result<(), EngineError> {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -217,7 +221,7 @@ impl HttpFiles {
         let expected = job.sha1.clone();
         let expected_size = job.size;
         let hit = spawn_blocking_io(&job.dest, move || {
-            cache_hit(&dest_buf, expected.as_deref(), expected_size)
+            cache_hit(&dest_buf, expected.as_deref(), expected_size, mode)
         })
         .await?;
         if hit {
@@ -358,6 +362,7 @@ fn cache_hit(
     dest: &Path,
     expected_sha1: Option<&str>,
     expected_size: Option<u64>,
+    mode: PrepareMode,
 ) -> Result<bool, EngineError> {
     let meta = match std::fs::metadata(dest) {
         Ok(meta) => meta,
@@ -370,10 +375,18 @@ fn cache_hit(
     if expected_size.is_some_and(|size| meta.len() != size) {
         return Ok(false);
     }
-    match expected_sha1 {
-        None => Ok(true),
-        Some(expected) => Ok(hash_file(dest)? == expected.to_ascii_lowercase()),
+    let must_hash = match (mode, expected_sha1, expected_size) {
+        (PrepareMode::Warm, _, Some(_)) => false,
+        (PrepareMode::Warm, Some(_), None) => true,
+        (PrepareMode::Warm, None, None) => false,
+        (PrepareMode::Verify, Some(_), _) => true,
+        (PrepareMode::Verify, None, _) => false,
+    };
+    if !must_hash {
+        return Ok(true);
     }
+    let expected = expected_sha1.expect("must_hash implies sha1");
+    Ok(hash_file(dest)? == expected.to_ascii_lowercase())
 }
 
 fn hash_file(path: &Path) -> Result<String, EngineError> {
@@ -489,9 +502,9 @@ fn reqwest_error(url: &str, err: reqwest::Error) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use super::{DownloadJob, HttpFiles, schedule_jobs};
+    use super::{DownloadJob, HttpFiles, cache_hit, schedule_jobs};
     use crate::error::EngineError;
-    use crate::types::ProgressSink;
+    use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
@@ -503,6 +516,64 @@ mod tests {
 
     fn sha1_hex(bytes: &[u8]) -> String {
         hex::encode(Sha1::digest(bytes))
+    }
+
+    #[test]
+    fn warm_size_match_does_not_need_sha1() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.bin");
+        std::fs::write(&dest, b"wrong-bytes-same-len!").unwrap();
+        // 21 bytes. SHA-1 of "abc" would miss. Warm + matching size must still hit.
+        assert!(cache_hit(&dest, Some("deadbeef"), Some(21), PrepareMode::Warm).unwrap());
+    }
+
+    #[test]
+    fn verify_size_match_still_checks_sha1() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.bin");
+        std::fs::write(&dest, b"wrong-bytes-same-len!").unwrap();
+        assert!(!cache_hit(&dest, Some("deadbeef"), Some(21), PrepareMode::Verify).unwrap());
+    }
+
+    #[test]
+    fn warm_unknown_size_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.bin");
+        let body = b"abc";
+        std::fs::write(&dest, body).unwrap();
+        let hash = sha1_hex(body);
+        assert!(cache_hit(&dest, Some(&hash), None, PrepareMode::Warm).unwrap());
+        assert!(!cache_hit(&dest, Some("deadbeef"), None, PrepareMode::Warm).unwrap());
+    }
+
+    #[tokio::test]
+    async fn warm_size_hit_makes_zero_http() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("f.bin");
+        std::fs::write(&dest, b"abc").unwrap();
+        let jobs = vec![DownloadJob {
+            url: format!("{}/f", server.uri()),
+            dest,
+            sha1: Some("ffffffff".into()),
+            size: Some(3),
+        }];
+        HttpFiles::new()
+            .unwrap()
+            .download_many(
+                jobs,
+                "Files",
+                &NoopProgress,
+                &CancellationToken::new(),
+                PrepareMode::Warm,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -524,6 +595,7 @@ mod tests {
             &dest,
             Some(&hash),
             &CancellationToken::new(),
+            PrepareMode::Verify,
         )
         .await
         .unwrap();
@@ -549,6 +621,7 @@ mod tests {
             &dest,
             Some(&hash),
             &CancellationToken::new(),
+            PrepareMode::Verify,
         )
         .await
         .unwrap();
@@ -574,6 +647,7 @@ mod tests {
                 &dest,
                 Some("deadbeef"),
                 &CancellationToken::new(),
+                PrepareMode::Verify,
             )
             .await
             .unwrap_err();
@@ -586,7 +660,13 @@ mod tests {
         cancel.cancel();
         let err = HttpFiles::new()
             .unwrap()
-            .download_sha1("http://127.0.0.1:1/", Path::new("/tmp/x"), None, &cancel)
+            .download_sha1(
+                "http://127.0.0.1:1/",
+                Path::new("/tmp/x"),
+                None,
+                &cancel,
+                PrepareMode::Warm,
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::Cancelled));
@@ -618,7 +698,13 @@ mod tests {
             .collect();
         HttpFiles::new()
             .unwrap()
-            .download_many(jobs, "Files", &NoopProgress, &CancellationToken::new())
+            .download_many(
+                jobs,
+                "Files",
+                &NoopProgress,
+                &CancellationToken::new(),
+                PrepareMode::Warm,
+            )
             .await
             .unwrap();
         for i in 0..n {
@@ -655,7 +741,7 @@ mod tests {
         });
         let err = HttpFiles::new()
             .unwrap()
-            .download_many(jobs, "Files", &NoopProgress, &cancel)
+            .download_many(jobs, "Files", &NoopProgress, &cancel, PrepareMode::Warm)
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::Cancelled));
@@ -700,6 +786,7 @@ mod tests {
                 &dest,
                 Some(&hash),
                 &CancellationToken::new(),
+                PrepareMode::Verify,
             )
             .await
             .unwrap();

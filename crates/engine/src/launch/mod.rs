@@ -227,7 +227,7 @@ impl Engine {
         if manifest_path.exists() {
             let _ = std::fs::remove_file(&manifest_path);
         }
-        http.download_sha1(VERSION_MANIFEST_URL, &manifest_path, None, cancel)
+        http.download_sha1(VERSION_MANIFEST_URL, &manifest_path, None, cancel, mode)
             .await?;
         progress.set("Version manifest", 1, 1);
         let manifest: VersionManifest = read_json(&manifest_path)?;
@@ -242,8 +242,14 @@ impl Engine {
         check_cancel(cancel)?;
         progress.set("Version", 0, 1);
         let version_path = self.paths.cache_meta.join(meta_json_name(&entry.id)?);
-        http.download_sha1(&entry.url, &version_path, entry.sha1.as_deref(), cancel)
-            .await?;
+        http.download_sha1(
+            &entry.url,
+            &version_path,
+            entry.sha1.as_deref(),
+            cancel,
+            mode,
+        )
+        .await?;
         progress.set("Version", 1, 1);
         let version: VersionInfo = read_json(&version_path)?;
         let mut version = match row.loader {
@@ -260,6 +266,7 @@ impl Engine {
                     row.loader_version.as_deref(),
                     progress,
                     cancel,
+                    mode,
                 )
                 .await?,
             ),
@@ -271,6 +278,7 @@ impl Engine {
                     row.loader_version.as_deref(),
                     progress,
                     cancel,
+                    mode,
                 )
                 .await?,
             ),
@@ -286,12 +294,13 @@ impl Engine {
             custom.as_deref(),
             progress,
             cancel,
+            mode,
         )
         .await?;
 
         check_cancel(cancel)?;
         progress.set("Client", 0, 1);
-        let client = fetch_client(&http, &self.paths, &version, cancel).await?;
+        let client = fetch_client(&http, &self.paths, &version, cancel, mode).await?;
         progress.set("Client", 1, 1);
 
         if let Some((profile, forge_version)) = installer {
@@ -305,7 +314,8 @@ impl Engine {
 
         check_cancel(cancel)?;
         let artifacts = select_libraries(&version);
-        let lib_dests = fetch_libraries(&http, &self.paths, &artifacts, progress, cancel).await?;
+        let lib_dests =
+            fetch_libraries(&http, &self.paths, &artifacts, progress, cancel, mode).await?;
 
         check_cancel(cancel)?;
         let natives_dir = self
@@ -341,6 +351,7 @@ impl Engine {
                 &cwd,
                 progress,
                 cancel,
+                mode,
             )
             .await?;
             (assets_root_path(&root), idx.id.clone())
@@ -369,6 +380,7 @@ impl Engine {
                     &dest,
                     Some(client_log.file.sha1.as_str()),
                     cancel,
+                    mode,
                 )
                 .await?;
                 progress.set("Logging", 1, 1);

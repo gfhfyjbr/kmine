@@ -6,7 +6,7 @@ use crate::http::HttpFiles;
 use crate::ids::Loader;
 use crate::mojang::VersionInfo;
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use tokio_util::sync::CancellationToken;
 
 pub const MAVEN_METADATA_URL: &str =
@@ -77,6 +77,7 @@ pub async fn prepare_neoforge(
     preferred: Option<&str>,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(ForgeInstallProfile, VersionInfo), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
@@ -86,7 +87,7 @@ pub async fn prepare_neoforge(
     if meta_path.exists() {
         let _ = std::fs::remove_file(&meta_path);
     }
-    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel)
+    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel, mode)
         .await?;
     let xml = std::fs::read_to_string(&meta_path).map_err(|e| EngineError::io(&meta_path, e))?;
     let versions = forge::parse_maven_versions(&xml)?;
@@ -115,9 +116,9 @@ pub async fn prepare_neoforge(
         "net/neoforged/{artifact}/{ver}/{artifact}-{ver}-installer.jar"
     ));
     let sha1_path = installer_path.with_extension("jar.sha1");
-    let sha1 = forge::fetch_installer_sha1(http, &url, &sha1_path, cancel).await?;
+    let sha1 = forge::fetch_installer_sha1(http, &url, &sha1_path, cancel, mode).await?;
     match http
-        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel)
+        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel, mode)
         .await
     {
         Err(EngineError::Http { status: 404, .. }) => {
@@ -134,7 +135,7 @@ pub async fn prepare_neoforge(
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
-    forge::fetch_installer_libraries(http, paths, &profile, progress, cancel).await?;
+    forge::fetch_installer_libraries(http, paths, &profile, progress, cancel, mode).await?;
     Ok((profile, version))
 }
 

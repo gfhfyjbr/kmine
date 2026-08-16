@@ -3,7 +3,7 @@ use super::{Artifact, VersionInfo};
 use crate::error::EngineError;
 use crate::http::{DownloadJob, HttpFiles};
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use sha1::{Digest, Sha1};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -58,6 +58,7 @@ pub async fn fetch_libraries(
     artifacts: &[LibraryArtifact],
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<Vec<PathBuf>, EngineError> {
     let mut dests = Vec::with_capacity(artifacts.len());
     let mut jobs = Vec::new();
@@ -84,7 +85,7 @@ pub async fn fetch_libraries(
         });
         dests.push(dest);
     }
-    http.download_many(jobs, "Libraries", progress, cancel)
+    http.download_many(jobs, "Libraries", progress, cancel, mode)
         .await?;
     Ok(dests)
 }
@@ -144,6 +145,7 @@ pub async fn fetch_client(
     paths: &LauncherPaths,
     version: &VersionInfo,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<PathBuf, EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
@@ -165,7 +167,7 @@ pub async fn fetch_client(
         .join("minecraft")
         .join(&version.id)
         .join(format!("minecraft-{}-client.jar", version.id));
-    http.download_sha1(&client.url, &dest, Some(&client.sha1), cancel)
+    http.download_sha1(&client.url, &dest, Some(&client.sha1), cancel, mode)
         .await?;
     Ok(dest)
 }
@@ -282,6 +284,7 @@ mod tests {
             &[artifact("../escape.jar")],
             &Noop,
             &CancellationToken::new(),
+            crate::types::PrepareMode::Warm,
         )
         .await
         .unwrap_err();

@@ -7,7 +7,7 @@ use crate::http::{DownloadJob, HttpFiles};
 use crate::ids::Loader;
 use crate::mojang::{Artifact, Library, LibraryDownloads, VersionInfo};
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde::Deserialize;
@@ -165,6 +165,7 @@ pub async fn prepare_forge(
     preferred: Option<&str>,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(ForgeInstallProfile, VersionInfo), EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
@@ -174,7 +175,7 @@ pub async fn prepare_forge(
     if meta_path.exists() {
         let _ = std::fs::remove_file(&meta_path);
     }
-    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel)
+    http.download_sha1(MAVEN_METADATA_URL, &meta_path, None, cancel, mode)
         .await?;
     let xml = std::fs::read_to_string(&meta_path).map_err(|e| EngineError::io(&meta_path, e))?;
     let versions = parse_maven_versions(&xml)?;
@@ -198,9 +199,9 @@ pub async fn prepare_forge(
         "net/minecraftforge/forge/{ver}/forge-{ver}-installer.jar"
     ));
     let sha1_path = installer_path.with_extension("jar.sha1");
-    let sha1 = fetch_installer_sha1(http, &url, &sha1_path, cancel).await?;
+    let sha1 = fetch_installer_sha1(http, &url, &sha1_path, cancel, mode).await?;
     match http
-        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel)
+        .download_sha1(&url, &installer_path, sha1.as_deref(), cancel, mode)
         .await
     {
         Err(EngineError::Http { status: 404, .. }) => {
@@ -217,7 +218,7 @@ pub async fn prepare_forge(
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
     }
-    fetch_installer_libraries(http, paths, &profile, progress, cancel).await?;
+    fetch_installer_libraries(http, paths, &profile, progress, cancel, mode).await?;
     Ok((profile, forge_version))
 }
 
@@ -226,9 +227,10 @@ pub(crate) async fn fetch_installer_sha1(
     installer_url: &str,
     dest: &Path,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<Option<String>, EngineError> {
     let url = format!("{installer_url}.sha1");
-    match http.download_sha1(&url, dest, None, cancel).await {
+    match http.download_sha1(&url, dest, None, cancel, mode).await {
         Ok(()) => {
             let text = std::fs::read_to_string(dest).map_err(|e| EngineError::io(dest, e))?;
             let hash = text
@@ -254,6 +256,7 @@ pub(crate) async fn fetch_installer_libraries(
     profile: &ForgeInstallProfile,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<(), EngineError> {
     let mut libs = profile.libraries.clone();
     for lib in &mut libs {
@@ -289,7 +292,7 @@ pub(crate) async fn fetch_installer_libraries(
             });
         }
     }
-    http.download_many(jobs, "Forge libraries", progress, cancel)
+    http.download_many(jobs, "Forge libraries", progress, cancel, mode)
         .await?;
     Ok(())
 }

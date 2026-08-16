@@ -6,7 +6,7 @@ use crate::error::EngineError;
 use crate::http::{DownloadJob, HttpFiles};
 use crate::mojang::VersionInfo;
 use crate::paths::LauncherPaths;
-use crate::types::ProgressSink;
+use crate::types::{PrepareMode, ProgressSink};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
@@ -45,6 +45,7 @@ pub async fn resolve_java(
     custom: Option<&Path>,
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
+    mode: PrepareMode,
 ) -> Result<PathBuf, EngineError> {
     resolve_java_from(
         http,
@@ -54,6 +55,7 @@ pub async fn resolve_java(
         progress,
         cancel,
         JAVA_RUNTIME_ALL_JSON,
+        mode,
     )
     .await
 }
@@ -66,6 +68,7 @@ async fn resolve_java_from(
     progress: &dyn ProgressSink,
     cancel: &CancellationToken,
     all_json_url: &str,
+    mode: PrepareMode,
 ) -> Result<PathBuf, EngineError> {
     if cancel.is_cancelled() {
         return Err(EngineError::Cancelled);
@@ -86,7 +89,7 @@ async fn resolve_java_from(
     if all_path.exists() {
         let _ = std::fs::remove_file(&all_path);
     }
-    http.download_sha1(all_json_url, &all_path, None, cancel)
+    http.download_sha1(all_json_url, &all_path, None, cancel, mode)
         .await?;
     let bytes = std::fs::read(&all_path).map_err(|e| EngineError::io(&all_path, e))?;
     let all: JavaAll = serde_json::from_slice(&bytes)
@@ -103,6 +106,7 @@ async fn resolve_java_from(
         &manifest_path,
         entry.manifest.sha1.as_deref(),
         cancel,
+        mode,
     )
     .await?;
     let manifest_bytes =
@@ -151,7 +155,8 @@ async fn resolve_java_from(
             RuntimeFile::Link { target } => links.push((dest, target.clone())),
         }
     }
-    http.download_many(jobs, "Java", progress, cancel).await?;
+    http.download_many(jobs, "Java", progress, cancel, mode)
+        .await?;
     for dest in executables {
         set_executable(&dest)?;
     }
@@ -314,7 +319,7 @@ mod tests {
     use crate::http::HttpFiles;
     use crate::mojang::VersionInfo;
     use crate::paths::LauncherPaths;
-    use crate::types::ProgressSink;
+    use crate::types::{PrepareMode, ProgressSink};
     use sha1::{Digest, Sha1};
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
@@ -382,6 +387,7 @@ mod tests {
             Some(Path::new("/no/java/here")),
             &NoopProgress,
             &CancellationToken::new(),
+            PrepareMode::Warm,
         )
         .await
         .unwrap_err();
@@ -461,6 +467,7 @@ mod tests {
             &NoopProgress,
             &CancellationToken::new(),
             &format!("{}/all.json", server.uri()),
+            PrepareMode::Warm,
         )
         .await
         .unwrap();
