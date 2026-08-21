@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{App, Styled, Window};
 use gpui_component::{
-    button::ButtonVariant, dialog::DialogButtonProps, ActiveTheme, Icon, IconName, WindowExt,
+    ActiveTheme, Icon, IconName, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
 };
 
 pub fn danger(

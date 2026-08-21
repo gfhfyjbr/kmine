@@ -1,4 +1,4 @@
-use super::extract::{extract_from_bytes, CfCoreKey, CfKeyError};
+use super::extract::{CfCoreKey, CfKeyError, extract_from_bytes};
 use std::time::Duration;
 
 pub const LATEST_MAC_DMG: &str = "https://curseforge.overwolf.com/downloads/curseforge-latest.dmg";

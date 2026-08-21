@@ -1,4 +1,4 @@
-use kmine_backend_api::{reextract, router, AppState};
+use kmine_backend_api::{AppState, reextract, router};
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 

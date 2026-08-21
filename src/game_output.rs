@@ -3,7 +3,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     App, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, WeakEntity, Window, div, px,
+    Styled, WeakEntity, Window, div, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable,
@@ -290,7 +290,11 @@ impl Render for GameOutput {
                     .flex_shrink_0()
                     .when(!glass, |this| this.bg(cx.theme().background))
                     .border_b_1()
-                    .border_color(cx.theme().border)
+                    .border_color(if glass {
+                        gpui::rgba(0xffffff14).into()
+                    } else {
+                        cx.theme().border
+                    })
                     .child(
                         h_flex()
                             .min_w_0()
@@ -318,18 +322,20 @@ impl Render for GameOutput {
                     .child(header_action(self, cx)),
             )
             .child(
-                self.scroll
-                    .vertical(
-                        v_flex()
-                            .id("game-output-lines")
-                            .flex_1()
-                            .min_h_0()
-                            .p_4()
-                            .gap_1()
-                            .bg(cx.theme().secondary)
-                            .font_family(SharedString::from("Menlo")),
-                    )
-                    .children(self.lines.iter().map(|line| render_line(line, cx))),
+                div().flex_1().min_h_0().px_3().pb_3().child(
+                    self.scroll
+                        .vertical(
+                            v_flex()
+                                .id("game-output-lines")
+                                .size_full()
+                                .p_4()
+                                .gap_1()
+                                .rounded(px(12.))
+                                .bg(cx.theme().secondary)
+                                .font_family(cx.theme().mono_font_family.clone()),
+                        )
+                        .children(self.lines.iter().map(|line| render_line(line, cx))),
+                ),
             )
     }
 }
@@ -402,9 +408,9 @@ fn format_progress(title: &str, done: u64, total: u64) -> String {
     if total == 0 {
         title.to_string()
     } else if total >= 1_000_000 {
-        format!("{title} — {} / {}", fmt_bytes(done), fmt_bytes(total))
+        format!("{title}  {} / {}", fmt_bytes(done), fmt_bytes(total))
     } else {
-        format!("{title} — {done} / {total}")
+        format!("{title}  {done} / {total}")
     }
 }
 

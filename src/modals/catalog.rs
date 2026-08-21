@@ -1,15 +1,17 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px,
+    App, ClickEvent, Entity, FontWeight, Image, ImageFormat, InteractiveElement, IntoElement,
+    ObjectFit, ParentElement, RenderImage, SharedString, StatefulInteractiveElement, Styled,
+    StyledImage, Window, div, img, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable, IconName, Sizable,
     alert::Alert,
-    button::{Button, ButtonVariants},
+    button::Button,
     h_flex,
     input::{Input, InputState},
     spinner::Spinner,
@@ -22,7 +24,7 @@ use kmine_engine::{
 };
 
 use crate::chrome::{
-    chip, empty_panel, loader_label, modal_body, modal_close, modal_footer, modal_header,
+    chip, cta, empty_panel, loader_label, modal_body, modal_close, modal_footer, modal_header,
     sheet_wide,
 };
 
@@ -53,7 +55,7 @@ pub struct CatalogModal {
     pub game_version: Option<String>,
     pub loader: Option<Loader>,
     pub version_filter: Entity<InputState>,
-    pub images: HashMap<String, PathBuf>,
+    pub images: HashMap<String, Arc<RenderImage>>,
 }
 
 impl CatalogModal {
@@ -143,15 +145,8 @@ pub fn render(
                     .min_h(px(280.))
                     .overflow_hidden()
                     .child(if project_open {
-                        render_project(
-                            modal,
-                            on_back.clone(),
-                            on_select_file,
-                            on_more_files,
-                            on_website,
-                            cx,
-                        )
-                        .into_any_element()
+                        render_project(modal, on_select_file, on_more_files, on_website, cx)
+                            .into_any_element()
                     } else {
                         render_list(
                             modal,
@@ -173,8 +168,7 @@ pub fn render(
                             .on_click(on_back),
                     )
                     .child(
-                        Button::new("catalog-install")
-                            .primary()
+                        cta("catalog-install")
                             .label("Install")
                             .disabled(modal.selected_file.is_none())
                             .on_click(on_install),
@@ -236,7 +230,7 @@ fn render_list(
                     .gap_2()
                     .overflow_y_scroll()
                     .when(modal.loading && modal.page.is_none(), |this| {
-                        this.child(loading_row(cx))
+                        this.children((0..3).map(|index| skeleton_card(index, cx)))
                     })
                     .when(
                         !modal.loading
@@ -322,7 +316,7 @@ fn sort_row(
         .flex_shrink_0()
         .gap_1()
         .p(px(3.))
-        .rounded(px(10.))
+        .rounded(px(12.))
         .bg(cx.theme().muted)
         .children(options.into_iter().map(|(sort, label)| {
             let on_sort = on_sort.clone();
@@ -344,7 +338,7 @@ fn sort_tab(
     cx: &App,
 ) -> impl IntoElement {
     let (bg, fg) = if active {
-        (cx.theme().primary, cx.theme().primary_foreground)
+        (cx.theme().secondary_hover, cx.theme().foreground)
     } else {
         (cx.theme().transparent, cx.theme().muted_foreground)
     };
@@ -409,19 +403,24 @@ fn category_chip(
         .items_center()
         .rounded(px(6.))
         .bg(if selected {
-            cx.theme().primary
+            cx.theme().secondary_hover
         } else {
             cx.theme().muted
         })
         .text_color(if selected {
-            cx.theme().primary_foreground
+            cx.theme().foreground
         } else {
             cx.theme().muted_foreground
         })
         .text_xs()
         .when(!disabled, |this| {
             this.cursor_pointer()
-                .hover(|this| this.bg(cx.theme().secondary_hover))
+                .when(!selected, |this| {
+                    this.hover(|this| {
+                        this.bg(cx.theme().secondary_hover)
+                            .text_color(cx.theme().foreground)
+                    })
+                })
                 .on_click(on_click)
         })
         .child(name)
@@ -429,7 +428,7 @@ fn category_chip(
 
 fn project_card(
     project: &CatalogProject,
-    logo: Option<&PathBuf>,
+    logo: Option<&Arc<RenderImage>>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
@@ -445,13 +444,13 @@ fn project_card(
         .items_center()
         .gap_3()
         .px_3()
-        .py_2()
-        .rounded(px(10.))
+        .py(px(10.))
+        .rounded(px(12.))
         .bg(cx.theme().muted)
         .cursor_pointer()
         .hover(|this| this.bg(cx.theme().secondary_hover))
         .on_click(on_click)
-        .child(logo_view(logo, px(44.), cx))
+        .child(logo_view(logo, px(52.), cx))
         .child(
             v_flex()
                 .min_w_0()
@@ -464,6 +463,16 @@ fn project_card(
                         .text_ellipsis()
                         .child(project.name.clone()),
                 )
+                .when(!project.summary.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .text_ellipsis()
+                            .line_clamp(2)
+                            .child(project.summary.clone()),
+                    )
+                })
                 .child(
                     div()
                         .text_xs()
@@ -482,7 +491,6 @@ fn project_card(
 
 fn render_project(
     modal: &CatalogModal,
-    on_back: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_select_file: impl Fn(String, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_more_files: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_website: impl Fn(String, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
@@ -501,13 +509,6 @@ fn render_project(
         .flex_1()
         .min_h_0()
         .gap_3()
-        .child(
-            Button::new("catalog-project-back")
-                .ghost()
-                .compact()
-                .label("Back")
-                .on_click(on_back),
-        )
         .child(
             h_flex()
                 .w_full()
@@ -653,8 +654,8 @@ fn file_row(
         .w_full()
         .gap_1()
         .px_3()
-        .py_2()
-        .rounded(px(10.))
+        .py(px(10.))
+        .rounded(px(12.))
         .border_1()
         .border_color(if selected {
             cx.theme().foreground.opacity(0.16)
@@ -687,46 +688,65 @@ fn file_row(
         })
 }
 
-fn logo_view(path: Option<&PathBuf>, size: gpui::Pixels, cx: &App) -> impl IntoElement {
+pub(crate) fn decode_cached_image(path: &Path, cx: &App) -> Option<Arc<RenderImage>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let format = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "webp" => ImageFormat::Webp,
+        "gif" => ImageFormat::Gif,
+        "bmp" => ImageFormat::Bmp,
+        _ => ImageFormat::Png,
+    };
+    Image::from_bytes(format, bytes)
+        .to_image_data(cx.svg_renderer())
+        .ok()
+}
+
+fn logo_view(image: Option<&Arc<RenderImage>>, size: gpui::Pixels, cx: &App) -> impl IntoElement {
     let frame = div()
         .size(size)
         .flex_shrink_0()
-        .rounded(px(8.))
+        .rounded(px(10.))
         .overflow_hidden()
-        .bg(cx.theme().secondary_active)
-        .border_1()
-        .border_color(cx.theme().border.opacity(0.55));
-    match path {
-        Some(path) => frame
+        .bg(cx.theme().secondary_active);
+    match image {
+        Some(image) => frame
             .child(
-                img(path.clone())
+                img(image.clone())
                     .size_full()
                     .object_fit(ObjectFit::Cover)
-                    .rounded(px(8.)),
+                    .rounded(px(10.)),
             )
             .into_any_element(),
         None => frame.into_any_element(),
     }
 }
 
-fn screenshot_view(index: usize, path: Option<&PathBuf>, cx: &App) -> impl IntoElement {
+fn screenshot_view(index: usize, image: Option<&Arc<RenderImage>>, cx: &App) -> impl IntoElement {
     let frame = div()
         .id(SharedString::from(format!("shot-{index}")))
-        .w(px(200.))
-        .h(px(112.))
+        .w(px(220.))
+        .h(px(124.))
         .flex_shrink_0()
-        .rounded(px(8.))
+        .rounded(px(10.))
         .overflow_hidden()
-        .bg(cx.theme().muted)
-        .border_1()
-        .border_color(cx.theme().border.opacity(0.55));
-    match path {
-        Some(path) => frame
+        .bg(cx.theme().muted);
+    match image {
+        Some(image) => frame
             .child(
-                img(path.clone())
+                img(image.clone())
                     .size_full()
                     .object_fit(ObjectFit::Cover)
-                    .rounded(px(8.)),
+                    .rounded(px(10.)),
             )
             .into_any_element(),
         None => frame.into_any_element(),
@@ -746,6 +766,45 @@ fn loading_row(cx: &App) -> impl IntoElement {
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child("Loading…"),
+        )
+}
+
+fn skeleton_card(index: usize, cx: &App) -> impl IntoElement {
+    h_flex()
+        .id(SharedString::from(format!("catalog-skel-{index}")))
+        .w_full()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py(px(10.))
+        .rounded(px(12.))
+        .bg(cx.theme().muted)
+        .child(
+            div()
+                .size(px(52.))
+                .flex_shrink_0()
+                .rounded(px(10.))
+                .bg(cx.theme().secondary_active),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .h(px(10.))
+                        .w(px(168.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary_active),
+                )
+                .child(
+                    div()
+                        .h(px(8.))
+                        .w(px(240.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary_active.opacity(0.65)),
+                ),
         )
 }
 

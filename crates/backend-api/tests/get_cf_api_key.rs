@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use kmine_backend_api::{app, AppState};
+use kmine_backend_api::{AppState, app};
 use std::path::PathBuf;
 use tower::ServiceExt;
 

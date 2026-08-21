@@ -257,9 +257,44 @@ impl Engine {
             delete_instance_dir(&self.paths, &row.slug)?;
         }
         store.delete_instance(id)?;
+        let mut pinned = store.pinned_instances()?;
+        if let Some(i) = pinned.iter().position(|pinned_id| *pinned_id == id) {
+            pinned.remove(i);
+            store.set_pinned_instances(&pinned)?;
+        }
         drop(store);
         self.emit(Event::InstancesChanged);
         Ok(())
+    }
+
+    pub fn pinned_instances(&self) -> Result<Vec<InstanceId>, EngineError> {
+        self.store.lock().pinned_instances()
+    }
+
+    pub fn toggle_instance_pin(&self, id: InstanceId) -> Result<bool, EngineError> {
+        let store = self.store.lock();
+        let mut pinned = store.pinned_instances()?;
+        let now_pinned = if let Some(i) = pinned.iter().position(|pinned_id| *pinned_id == id) {
+            pinned.remove(i);
+            false
+        } else {
+            pinned.push(id);
+            true
+        };
+        store.set_pinned_instances(&pinned)?;
+        Ok(now_pinned)
+    }
+
+    pub fn reorder_pinned_instance(
+        &self,
+        dragged: InstanceId,
+        target: InstanceId,
+    ) -> Result<Vec<InstanceId>, EngineError> {
+        let store = self.store.lock();
+        let mut pinned = store.pinned_instances()?;
+        move_pinned(&mut pinned, dragged, target);
+        store.set_pinned_instances(&pinned)?;
+        Ok(pinned)
     }
 
     pub async fn update_instance(
@@ -394,6 +429,20 @@ fn cache_instance_icon(paths: &LauncherPaths, row: &InstanceRow) -> Option<std::
     Some(dest)
 }
 
+fn move_pinned(pinned: &mut Vec<InstanceId>, dragged: InstanceId, target: InstanceId) {
+    if dragged == target {
+        return;
+    }
+    let Some(from) = pinned.iter().position(|id| *id == dragged) else {
+        return;
+    };
+    let Some(to) = pinned.iter().position(|id| *id == target) else {
+        return;
+    };
+    let item = pinned.remove(from);
+    pinned.insert(to, item);
+}
+
 pub(crate) fn instance_not_found(paths: &LauncherPaths) -> EngineError {
     EngineError::io(
         paths.instances.clone(),
@@ -428,6 +477,89 @@ mod tests {
         assert!(paths.instance_minecraft("Two").is_dir());
         engine.delete_instance(id).await.unwrap();
         assert!(engine.list_instances().unwrap().is_empty());
+    }
+
+    fn sample_instance() -> CreateInstance {
+        named_instance("One")
+    }
+
+    fn named_instance(name: &str) -> CreateInstance {
+        CreateInstance {
+            name: name.into(),
+            minecraft_version: "1.21.1".into(),
+            loader: Loader::Vanilla,
+            loader_version: None,
+            icon_png: None,
+        }
+    }
+
+    #[test]
+    fn move_pinned_places_dragged_at_target() {
+        let a = InstanceId::new();
+        let b = InstanceId::new();
+        let c = InstanceId::new();
+        let mut pins = vec![a, b, c];
+        move_pinned(&mut pins, a, c);
+        assert_eq!(pins, vec![b, c, a]);
+        move_pinned(&mut pins, c, b);
+        assert_eq!(pins, vec![c, b, a]);
+        move_pinned(&mut pins, a, a);
+        assert_eq!(pins, vec![c, b, a]);
+        move_pinned(&mut pins, InstanceId::new(), b);
+        assert_eq!(pins, vec![c, b, a]);
+    }
+
+    #[tokio::test]
+    async fn pinned_instance_survives_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let kc = MemoryKeychain::new();
+        let engine = Engine::open_with_keychain(paths.clone(), &kc).unwrap();
+        let id = engine.create_instance(sample_instance()).await.unwrap();
+        assert!(engine.pinned_instances().unwrap().is_empty());
+        assert!(engine.toggle_instance_pin(id).unwrap());
+        assert!(engine.pinned_instances().unwrap().contains(&id));
+        drop(engine);
+
+        let engine = Engine::open_with_keychain(paths, &kc).unwrap();
+        assert!(engine.pinned_instances().unwrap().contains(&id));
+        assert!(!engine.toggle_instance_pin(id).unwrap());
+        assert!(engine.pinned_instances().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_instance_drops_pin() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let kc = MemoryKeychain::new();
+        let engine = Engine::open_with_keychain(paths, &kc).unwrap();
+        let id = engine.create_instance(sample_instance()).await.unwrap();
+        engine.toggle_instance_pin(id).unwrap();
+        engine.delete_instance(id).await.unwrap();
+        assert!(engine.pinned_instances().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pinned_order_survives_reopen_and_reorder() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::new(root.path().to_path_buf());
+        paths.create_dirs().unwrap();
+        let kc = MemoryKeychain::new();
+        let engine = Engine::open_with_keychain(paths.clone(), &kc).unwrap();
+        let a = engine.create_instance(named_instance("A")).await.unwrap();
+        let b = engine.create_instance(named_instance("B")).await.unwrap();
+        let c = engine.create_instance(named_instance("C")).await.unwrap();
+        engine.toggle_instance_pin(a).unwrap();
+        engine.toggle_instance_pin(b).unwrap();
+        engine.toggle_instance_pin(c).unwrap();
+        assert_eq!(engine.pinned_instances().unwrap(), vec![a, b, c]);
+        assert_eq!(engine.reorder_pinned_instance(a, c).unwrap(), vec![b, c, a]);
+        drop(engine);
+
+        let engine = Engine::open_with_keychain(paths, &kc).unwrap();
+        assert_eq!(engine.pinned_instances().unwrap(), vec![b, c, a]);
     }
 
     #[tokio::test]

@@ -4,22 +4,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::prelude::*;
 
 use gpui::{
-    Animation, AnimationExt, App, ClickEvent, Div, ElementId, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Styled, StyledImage,
-    Window, div, img, px,
+    Animation, AnimationExt, App, ClickEvent, Div, ElementId, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ObjectFit, ParentElement, Styled, StyledImage, Window, div, img, px,
 };
 use gpui_component::{
+    ActiveTheme, Icon, IconName,
     alert::Alert,
     animation::cubic_bezier,
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Icon, IconName,
+    h_flex, v_flex,
 };
 use kmine_engine::Loader;
 
-/// Shared enter/transition motion. Longer settle than a snap, ease-out that
-/// glides into place instead of slamming.
+/// Shared enter motion for modals and instance switches.
 pub fn motion() -> Animation {
-    Animation::new(Duration::from_millis(400)).with_easing(cubic_bezier(0.16, 1., 0.3, 1.))
+    Animation::new(Duration::from_millis(320)).with_easing(cubic_bezier(0.16, 1., 0.3, 1.))
+}
+
+/// Faster motion for tab / segmented-control changes. Those fire often.
+pub fn tab_motion() -> Animation {
+    Animation::new(Duration::from_millis(220)).with_easing(cubic_bezier(0.16, 1., 0.3, 1.))
 }
 
 /// Primary action: white capsule, system type, extra horizontal padding.
@@ -28,7 +32,7 @@ pub fn cta(id: impl Into<ElementId>) -> Button {
 }
 
 pub fn style_cta(button: Button) -> Button {
-    button.rounded(px(999.)).px_4()
+    button.rounded(px(999.)).px_5()
 }
 
 pub fn dimmer(cx: &App) -> Div {
@@ -39,7 +43,7 @@ pub fn dimmer(cx: &App) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .bg(cx.theme().overlay.opacity(0.62))
+        .bg(cx.theme().overlay.opacity(0.56))
 }
 
 pub fn modal(
@@ -55,7 +59,9 @@ pub fn modal(
                 on_dismiss(&ClickEvent::default(), window, cx);
             })
         })
-        .with_animation("modal-fade", motion(), |this, delta| this.opacity(delta))
+        .with_animation("modal-fade", motion(), |this, delta| {
+            this.opacity(delta).pt(px(16. * (1. - delta)))
+        })
 }
 
 pub fn sheet(cx: &App) -> impl ParentElement + Styled + IntoElement {
@@ -91,9 +97,9 @@ pub fn modal_header(
         .pr(px(48.))
         .child(
             div()
-                .size(px(36.))
+                .size(px(38.))
                 .flex_shrink_0()
-                .rounded(px(10.))
+                .rounded(px(11.))
                 .bg(cx.theme().muted)
                 .flex()
                 .items_center()
@@ -134,8 +140,8 @@ pub fn modal_footer(cx: &App) -> impl ParentElement + Styled + IntoElement {
         .justify_end()
         .gap_2()
         .border_t_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted.opacity(0.35))
+        .border_color(cx.theme().border.opacity(0.8))
+        .bg(cx.theme().muted.opacity(0.28))
 }
 
 pub fn title(text: impl Into<String>) -> impl IntoElement {
@@ -158,7 +164,7 @@ pub fn empty_panel(
     hint: impl Into<String>,
     cx: &App,
 ) -> impl IntoElement {
-    empty_block(icon, title_text, hint, px(8.), px(8.), cx)
+    empty_block(icon, title_text, hint, px(16.), px(10.), cx)
 }
 
 pub fn empty_list(
@@ -183,12 +189,12 @@ fn empty_block(
         .items_center()
         .justify_center()
         .gap_1()
-        .px_4()
+        .px_5()
         .py(pad_y)
         .child(
             div()
-                .size(px(36.))
-                .rounded(px(10.))
+                .size(px(40.))
+                .rounded(px(12.))
                 .bg(cx.theme().secondary_active)
                 .flex()
                 .items_center()
@@ -261,8 +267,6 @@ pub fn instance_cover(
         .flex_shrink_0()
         .rounded(radius)
         .overflow_hidden()
-        .border_1()
-        .border_color(cx.theme().border.opacity(0.55))
         .bg(cx.theme().secondary_active)
         .child(
             image
@@ -310,12 +314,13 @@ fn count_badge(count: usize, cx: &App) -> impl IntoElement {
 pub fn chip(text: impl Into<String>, cx: &App) -> impl IntoElement {
     div()
         .h(px(22.))
-        .px_2()
+        .px(px(8.))
         .flex()
         .items_center()
-        .rounded(px(6.))
+        .rounded(px(7.))
         .bg(cx.theme().secondary_active)
         .text_xs()
+        .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
@@ -333,14 +338,21 @@ pub fn running_pill(cx: &App) -> impl IntoElement {
     h_flex()
         .items_center()
         .gap_1()
-        .px_2()
+        .px(px(8.))
         .h(px(22.))
-        .rounded(px(6.))
+        .rounded(px(999.))
         .bg(cx.theme().success.opacity(0.16))
-        .child(running_mark(10.0, cx))
+        .child(
+            div()
+                .size(px(6.))
+                .rounded_full()
+                .bg(cx.theme().success)
+                .flex_shrink_0(),
+        )
         .child(
             div()
                 .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().success)
                 .child("Running"),
         )
@@ -349,13 +361,13 @@ pub fn running_pill(cx: &App) -> impl IntoElement {
 pub fn list_frame(cx: &App) -> Div {
     v_flex()
         .w_full()
-        .rounded(px(10.))
+        .rounded(px(12.))
         .bg(cx.theme().muted)
         .overflow_hidden()
 }
 
 pub fn list_row_corners<T: Styled>(this: T, first: bool, last: bool) -> T {
-    let radius = px(10.);
+    let radius = px(12.);
     let none = px(0.);
     this.rounded(none)
         .rounded_tl(if first { radius } else { none })
@@ -383,7 +395,7 @@ pub fn segmented(id: impl Into<ElementId>, cx: &App) -> impl ParentElement + Sty
         .w_full()
         .p(px(3.))
         .gap_1()
-        .rounded(px(10.))
+        .rounded(px(12.))
         .bg(cx.theme().muted)
 }
 
@@ -422,7 +434,7 @@ pub fn filled_segment(
     h_flex()
         .id(id)
         .flex_1()
-        .h(px(28.))
+        .h(px(30.))
         .px_3()
         .items_center()
         .justify_center()

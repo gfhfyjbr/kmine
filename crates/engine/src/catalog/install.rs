@@ -76,14 +76,13 @@ impl Engine {
             .await
     }
 
+    pub fn cached_remote_image(&self, url: &str) -> Option<PathBuf> {
+        cache::find_cached_image(&self.paths.cache_catalog_images, url)
+    }
+
     pub async fn cache_remote_image(&self, url: &str) -> Result<PathBuf, EngineError> {
-        let hash = cache::sha1_hex(url.as_bytes());
-        let dir = &self.paths.cache_catalog_images;
-        for ext in [".png", ".jpg", ".webp", ".img"] {
-            let path = dir.join(format!("{hash}{ext}"));
-            if path.is_file() {
-                return Ok(path);
-            }
+        if let Some(path) = self.cached_remote_image(url) {
+            return Ok(path);
         }
 
         let http = HttpFiles::new()?;
@@ -105,10 +104,23 @@ impl Engine {
         let bytes = response.bytes().await.map_err(|err| {
             EngineError::io(PathBuf::from(url), std::io::Error::other(err.to_string()))
         })?;
-        let ext = image_ext(content_type.as_deref(), url);
+        if bytes.is_empty() {
+            return Err(EngineError::io(
+                PathBuf::from(url),
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "empty image"),
+            ));
+        }
+        if let Some(path) = self.cached_remote_image(url) {
+            return Ok(path);
+        }
+        let dir = &self.paths.cache_catalog_images;
         std::fs::create_dir_all(dir).map_err(|e| EngineError::io(dir, e))?;
+        let hash = cache::image_cache_key(url);
+        let ext = image_ext(content_type.as_deref(), url);
         let dest = dir.join(format!("{hash}{ext}"));
-        std::fs::write(&dest, &bytes).map_err(|e| EngineError::io(&dest, e))?;
+        let tmp = dir.join(format!("{hash}{ext}.part"));
+        std::fs::write(&tmp, &bytes).map_err(|e| EngineError::io(&tmp, e))?;
+        std::fs::rename(&tmp, &dest).map_err(|e| EngineError::io(&dest, e))?;
         Ok(dest)
     }
 
@@ -1046,5 +1058,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::InstanceBusy));
+    }
+
+    #[tokio::test]
+    async fn cache_remote_image_reuses_disk_and_skips_http() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/logo.png"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_raw(b"png-bytes", "image/png"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_root, engine) = test_engine();
+        let url = format!("{}/logo.png", server.uri());
+        assert!(engine.cached_remote_image(&url).is_none());
+        let first = engine.cache_remote_image(&url).await.unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"png-bytes");
+        assert_eq!(
+            engine.cached_remote_image(&url).as_deref(),
+            Some(first.as_path())
+        );
+        let second = engine.cache_remote_image(&url).await.unwrap();
+        assert_eq!(first, second);
     }
 }

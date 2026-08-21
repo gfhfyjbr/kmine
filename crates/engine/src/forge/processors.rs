@@ -363,9 +363,8 @@ mod tests {
         );
         assert!(
             stamp.ends_with("cache/meta/forge-processors/forge-1.21.1-52.0.0-installer.ok")
-                || stamp.ends_with(
-                    "cache\\meta\\forge-processors\\forge-1.21.1-52.0.0-installer.ok"
-                )
+                || stamp
+                    .ends_with("cache\\meta\\forge-processors\\forge-1.21.1-52.0.0-installer.ok")
         );
     }
 

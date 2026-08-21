@@ -6,6 +6,7 @@ use crate::error::EngineError;
 use crate::ids::{AccountId, InstanceId, Loader};
 use crate::types::{AccountRecord, InstanceRow};
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 
 pub use keychain::{Keychain, MemoryKeychain, OsKeychain};
@@ -177,6 +178,21 @@ impl Store {
             None => "null".into(),
         };
         self.set_config("selected_account", &value)
+    }
+
+    pub fn pinned_instances(&self) -> Result<Vec<InstanceId>, EngineError> {
+        let Some(raw) = self.get_config("pinned_instances")? else {
+            return Ok(Vec::new());
+        };
+        let ids: Vec<InstanceId> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut seen = HashSet::new();
+        Ok(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+    }
+
+    pub fn set_pinned_instances(&self, ids: &[InstanceId]) -> Result<(), EngineError> {
+        let value = serde_json::to_string(ids)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.set_config("pinned_instances", &value)
     }
 
     pub fn insert_instance(&self, row: &InstanceRow) -> Result<(), EngineError> {
@@ -492,5 +508,44 @@ mod tests {
         let list = store.list_instances().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].minecraft_version, "1.21.1");
+    }
+
+    #[test]
+    fn pinned_instances_default_empty() {
+        let store = open_mem();
+        assert!(store.pinned_instances().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pinned_instances_round_trip() {
+        let store = open_mem();
+        let a = InstanceId::new();
+        let b = InstanceId::new();
+        let pinned = vec![b, a];
+        store.set_pinned_instances(&pinned).unwrap();
+        assert_eq!(store.pinned_instances().unwrap(), pinned);
+        store.set_pinned_instances(&[]).unwrap();
+        assert!(store.pinned_instances().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pinned_instances_invalid_json_is_empty() {
+        let store = open_mem();
+        store.set_config("pinned_instances", "not-json").unwrap();
+        assert!(store.pinned_instances().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pinned_instances_dedupes_and_keeps_first() {
+        let store = open_mem();
+        let a = InstanceId::new();
+        let b = InstanceId::new();
+        store
+            .set_config(
+                "pinned_instances",
+                &serde_json::to_string(&vec![a, b, a]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(store.pinned_instances().unwrap(), vec![a, b]);
     }
 }

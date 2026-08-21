@@ -1,10 +1,10 @@
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::middleware::{from_fn_with_state, Next};
+use axum::http::{StatusCode, header};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use kmine_curseforge::{extract_from_source, CfCoreKey};
+use kmine_curseforge::{CfCoreKey, extract_from_source};
 use serde_json::json;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};

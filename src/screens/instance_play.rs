@@ -2,12 +2,13 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
+    App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ObjectFit, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px,
 };
 use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable,
+    h_flex, v_flex,
 };
 use kmine_engine::{InstanceSummary, QuickPlay, QuickPlayLists, QuickPlayWorld};
 
@@ -84,20 +85,21 @@ pub fn launch_hero(
     h_flex()
         .w_full()
         .flex_shrink_0()
-        .px_4()
-        .py_3()
-        .gap_3()
+        .px_5()
+        .py_5()
+        .gap_4()
         .items_center()
         .rounded(cx.theme().radius_lg)
         .bg(cx.theme().muted)
         .when(running, |this| {
-            this.border_1()
-                .border_color(cx.theme().success.opacity(0.28))
+            this.bg(cx.theme().success.opacity(0.1))
+                .border_1()
+                .border_color(cx.theme().success.opacity(0.32))
         })
         .child(instance_cover(
             instance.icon.as_deref(),
             instance.loader,
-            72.0,
+            96.0,
             cx,
         ))
         .child(
@@ -114,7 +116,7 @@ pub fn launch_hero(
                             div()
                                 .min_w_0()
                                 .text_xl()
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_ellipsis()
                                 .child(instance.name.clone()),
                         )
@@ -140,7 +142,8 @@ pub fn launch_hero(
         )
         .child(
             v_flex()
-                .gap_2()
+                .items_end()
+                .gap_1()
                 .child(
                     style_cta(Button::new("play").large())
                         .when(running, |this| this.danger())
@@ -165,6 +168,8 @@ pub fn launch_hero(
                 )
                 .child(
                     Button::new("verify-files")
+                        .ghost()
+                        .compact()
                         .label("Verify files")
                         .disabled(preparing || running)
                         .on_click(on_verify),
@@ -231,12 +236,14 @@ fn world_row(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
+    let group = SharedString::from(format!("world-row-{}", world.folder));
     list_row_corners(
         h_flex()
             .id(SharedString::from(format!("world-{}", world.folder)))
+            .group(group.clone())
             .w_full()
             .px_3()
-            .py_2()
+            .py(px(10.))
             .items_center()
             .justify_between()
             .gap_3(),
@@ -275,22 +282,29 @@ fn world_row(
             ),
     )
     .child(
-        Icon::new(IconName::Play)
-            .text_sm()
-            .text_color(cx.theme().muted_foreground),
+        div()
+            .invisible()
+            .when(!disabled, |this| {
+                this.group_hover(group, |style| style.visible())
+            })
+            .child(
+                Icon::new(IconName::Play)
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            ),
     )
 }
 
 fn world_icon(icon: Option<PathBuf>, cx: &App) -> impl IntoElement {
     let size = px(44.);
-    let radius = px(8.);
+    let radius = px(10.);
     match icon {
-        Some(path) => img(path)
+        Some(path) => div()
             .size(size)
             .flex_shrink_0()
             .rounded(radius)
-            .object_fit(ObjectFit::Fill)
             .overflow_hidden()
+            .child(img(path).size_full().object_fit(ObjectFit::Fill))
             .into_any_element(),
         None => div()
             .size(size)
@@ -371,12 +385,14 @@ fn quick_row(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
+    let group = SharedString::from(format!("quick-row-{id}"));
     list_row_corners(
         h_flex()
             .id(id)
+            .group(group.clone())
             .w_full()
             .px_3()
-            .py_2()
+            .py(px(10.))
             .items_center()
             .justify_between()
             .gap_3(),
@@ -398,7 +414,7 @@ fn quick_row(
                 div()
                     .size(px(44.))
                     .flex_shrink_0()
-                    .rounded(px(8.))
+                    .rounded(px(10.))
                     .bg(cx.theme().secondary_active)
                     .flex()
                     .items_center()
@@ -429,8 +445,15 @@ fn quick_row(
             ),
     )
     .child(
-        Icon::new(IconName::Play)
-            .text_sm()
-            .text_color(cx.theme().muted_foreground),
+        div()
+            .invisible()
+            .when(!disabled, |this| {
+                this.group_hover(group, |style| style.visible())
+            })
+            .child(
+                Icon::new(IconName::Play)
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
+            ),
     )
 }

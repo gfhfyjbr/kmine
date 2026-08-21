@@ -164,6 +164,8 @@ cd kmine
 cargo run --release
 ```
 
+On macOS, `cargo run` wraps the binary in `target/{debug,release}/kmine.app` so Finder, Dock, and Cmd-Tab use `assets/icon/AppIcon` (`CFBundleIconFile` / `CFBundleIconName`). Run cargo from the workspace root. A runtime `setApplicationIconImage` is only a fallback if you launch the naked binary.
+
 Release is `thin` LTO, one codegen unit, stripped, `panic = abort`. Debug is fine for UI work.
 
 Tests:

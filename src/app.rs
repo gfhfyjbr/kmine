@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,11 +6,11 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     AnimationExt, App, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, point, px, relative, size, transparent_black,
+    RenderImage, SharedString, Styled, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions, div, point, px, relative, rgba, size, transparent_black,
 };
 use gpui_component::{
-    ActiveTheme, IconName, Root,
+    ActiveTheme, Icon, IconName, Root,
     dialog::Cancel,
     h_flex,
     input::{InputEvent, InputState},
@@ -20,7 +20,7 @@ use gpui_component::{
 };
 
 use crate::chrome::{
-    empty_panel, filled_segment, is_success_status, motion, status_alert, FILES_VERIFIED,
+    FILES_VERIFIED, filled_segment, is_success_status, motion, status_alert, tab_motion,
 };
 use crate::providers::CurseForgeProvider;
 use kmine_engine::{
@@ -66,6 +66,8 @@ pub struct KmineApp {
     status_epoch: u64,
     create: Option<CreateInstanceForm>,
     catalog: Option<CatalogModal>,
+    catalog_images: HashMap<String, Arc<RenderImage>>,
+    catalog_image_inflight: HashSet<String>,
     search_gen: u64,
     detail_gen: u64,
     accounts: AccountsModal,
@@ -78,13 +80,14 @@ pub struct KmineApp {
     content_mods: Vec<ContentEntry>,
     content_resourcepacks: Vec<ContentEntry>,
     content_shaderpacks: Vec<ContentEntry>,
+    mods_expanded: bool,
     quick_play: QuickPlayLists,
     settings: Option<instance_settings::SettingsForm>,
     settings_saving: bool,
     settings_dirty: bool,
     skin_face: Option<PathBuf>,
     skin_for: Option<AccountId>,
-    pinned: HashSet<InstanceId>,
+    pinned: Vec<InstanceId>,
     sidebar_scroll: SmoothScroll,
     play_scroll: SmoothScroll,
     content_scroll: SmoothScroll,
@@ -98,6 +101,7 @@ impl KmineApp {
         engine.start_catalog_key_refresh();
         let accounts = AccountsModal::from_engine(&engine);
         let instances = engine.list_instances().unwrap_or_default();
+        let pinned = engine.pinned_instances().unwrap_or_default();
         let mut this = Self {
             engine,
             rt: tokio::runtime::Handle::current(),
@@ -111,6 +115,8 @@ impl KmineApp {
             status_epoch: 0,
             create: None,
             catalog: None,
+            catalog_images: HashMap::new(),
+            catalog_image_inflight: HashSet::new(),
             search_gen: 0,
             detail_gen: 0,
             accounts,
@@ -123,13 +129,14 @@ impl KmineApp {
             content_mods: Vec::new(),
             content_resourcepacks: Vec::new(),
             content_shaderpacks: Vec::new(),
+            mods_expanded: false,
             quick_play: QuickPlayLists::default(),
             settings: None,
             settings_saving: false,
             settings_dirty: false,
             skin_face: None,
             skin_for: None,
-            pinned: HashSet::new(),
+            pinned,
             sidebar_scroll: SmoothScroll::new(),
             play_scroll: SmoothScroll::new(),
             content_scroll: SmoothScroll::new(),
@@ -255,6 +262,7 @@ impl KmineApp {
         self.instance_pane = InstancePane::Play;
         self.content_anim = ContentAnim::Instance;
         self.selected = Some(id);
+        self.mods_expanded = false;
         self.reload_content();
         self.reload_quick_play();
         cx.notify();
@@ -276,6 +284,11 @@ impl KmineApp {
                 }
             }
         }
+        cx.notify();
+    }
+
+    fn toggle_mods_expanded(&mut self, cx: &mut Context<Self>) {
+        self.mods_expanded = !self.mods_expanded;
         cx.notify();
     }
 
@@ -336,15 +349,21 @@ impl KmineApp {
         let jvm_flags = form.jvm_flags.clone();
         let java_path = form.java_path.clone();
         let account = form.account.clone();
-        cx.subscribe(&memory_min, |this, _, event: &SliderEvent, cx| match event {
-            SliderEvent::Change(_) => cx.notify(),
-            SliderEvent::Release(_) => this.save_settings(cx),
-        })
+        cx.subscribe(
+            &memory_min,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(_) => cx.notify(),
+                SliderEvent::Release(_) => this.save_settings(cx),
+            },
+        )
         .detach();
-        cx.subscribe(&memory_max, |this, _, event: &SliderEvent, cx| match event {
-            SliderEvent::Change(_) => cx.notify(),
-            SliderEvent::Release(_) => this.save_settings(cx),
-        })
+        cx.subscribe(
+            &memory_max,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(_) => cx.notify(),
+                SliderEvent::Release(_) => this.save_settings(cx),
+            },
+        )
         .detach();
         cx.subscribe(&jvm_flags, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change | InputEvent::Blur) {
@@ -662,6 +681,9 @@ impl KmineApp {
             .detach();
         }
         self.catalog = Some(modal);
+        if let Some(catalog) = self.catalog.as_mut() {
+            catalog.images.clone_from(&self.catalog_images);
+        }
         self.clear_status();
         self.search_gen = self.search_gen.wrapping_add(1);
         self.detail_gen = self.detail_gen.wrapping_add(1);
@@ -1111,15 +1133,52 @@ impl KmineApp {
                 urls.push(logo);
             }
         }
-        urls.retain(|url| !url.is_empty() && !catalog.images.contains_key(url));
+        urls.retain(|url| !url.is_empty());
         urls.sort();
         urls.dedup();
+
+        let engine = self.engine.clone();
+        let mut hits = Vec::new();
+        let mut to_fetch = Vec::new();
         for url in urls {
+            if self
+                .catalog
+                .as_ref()
+                .is_some_and(|c| c.images.contains_key(&url))
+            {
+                continue;
+            }
+            if let Some(image) = self.catalog_images.get(&url).cloned().or_else(|| {
+                engine
+                    .cached_remote_image(&url)
+                    .and_then(|path| catalog::decode_cached_image(&path, cx))
+            }) {
+                hits.push((url, image));
+            } else {
+                to_fetch.push(url);
+            }
+        }
+        let had_hits = !hits.is_empty();
+        for (url, path) in &hits {
+            self.catalog_images.insert(url.clone(), path.clone());
+        }
+        if let Some(catalog) = self.catalog.as_mut() {
+            for (url, path) in hits {
+                catalog.images.insert(url, path);
+            }
+        }
+        if had_hits {
+            cx.notify();
+        }
+        for url in to_fetch {
             self.cache_catalog_image(url, cx);
         }
     }
 
     fn cache_catalog_image(&mut self, url: String, cx: &mut Context<Self>) {
+        if !self.catalog_image_inflight.insert(url.clone()) {
+            return;
+        }
         let engine = self.engine.clone();
         let rt = self.rt.clone();
         let key = url.clone();
@@ -1128,9 +1187,15 @@ impl KmineApp {
                 .spawn(async move { engine.cache_remote_image(&url).await })
                 .await;
             this.update(cx, |this, cx| {
-                if let (Some(catalog), Ok(Ok(path))) = (this.catalog.as_mut(), result) {
-                    catalog.images.insert(key, path);
-                    cx.notify();
+                this.catalog_image_inflight.remove(&key);
+                if let Ok(Ok(path)) = result {
+                    if let Some(image) = catalog::decode_cached_image(&path, cx) {
+                        this.catalog_images.insert(key.clone(), image.clone());
+                        if let Some(catalog) = this.catalog.as_mut() {
+                            catalog.images.insert(key, image);
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -1367,8 +1432,18 @@ impl KmineApp {
     }
 
     fn toggle_pin(&mut self, id: InstanceId, cx: &mut Context<Self>) {
-        if !self.pinned.remove(&id) {
-            self.pinned.insert(id);
+        match self.engine.toggle_instance_pin(id) {
+            Ok(true) => self.pinned.push(id),
+            Ok(false) => self.pinned.retain(|pinned_id| *pinned_id != id),
+            Err(err) => self.set_status(err.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn reorder_pin(&mut self, dragged: InstanceId, target: InstanceId, cx: &mut Context<Self>) {
+        match self.engine.reorder_pinned_instance(dragged, target) {
+            Ok(pinned) => self.pinned = pinned,
+            Err(err) => self.set_status(err.to_string()),
         }
         cx.notify();
     }
@@ -1406,7 +1481,7 @@ impl KmineApp {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(())) => {
-                        this.pinned.remove(&id);
+                        this.pinned.retain(|pinned_id| *pinned_id != id);
                         if this.selected == Some(id) {
                             this.selected = None;
                             this.settings = None;
@@ -1723,9 +1798,8 @@ impl KmineApp {
         };
         let engine_for_close = engine.clone();
         let opened = cx.open_window(options, move |window, cx| {
-            let view = cx.new(|cx| {
-                crate::game_output::GameOutput::new(engine, rt, id, name, window, cx)
-            });
+            let view =
+                cx.new(|cx| crate::game_output::GameOutput::new(engine, rt, id, name, window, cx));
             cx.new(|cx| {
                 let mut root = Root::new(view, window, cx);
                 if glass {
@@ -1845,6 +1919,15 @@ impl Render for KmineApp {
                             },
                             {
                                 let this = this.clone();
+                                move |dragged, target, _, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.reorder_pin(dragged, target, cx);
+                                    })
+                                    .ok();
+                                }
+                            },
+                            {
+                                let this = this.clone();
                                 move |_, _, cx| {
                                     this.update(cx, |this, cx| this.open_accounts(cx)).ok();
                                 }
@@ -1867,7 +1950,11 @@ impl Render for KmineApp {
                                 .min_w_0()
                                 .bg(cx.theme().background)
                                 .border_l_1()
-                                .border_color(cx.theme().border)
+                                .border_color(if crate::sidebar_is_glass() {
+                                    rgba(0xffffff14).into()
+                                } else {
+                                    cx.theme().border
+                                })
                                 .overflow_hidden()
                                 .child(match selected {
                                     Some(instance) => right_pane(
@@ -1879,6 +1966,7 @@ impl Render for KmineApp {
                                         &self.content_mods,
                                         &self.content_resourcepacks,
                                         &self.content_shaderpacks,
+                                        self.mods_expanded,
                                         &self.quick_play,
                                         self.settings.as_ref(),
                                         &sandbox_status,
@@ -2113,6 +2201,7 @@ fn right_pane(
     mods: &[ContentEntry],
     resourcepacks: &[ContentEntry],
     shaderpacks: &[ContentEntry],
+    mods_expanded: bool,
     quick_play: &QuickPlayLists,
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
@@ -2180,6 +2269,7 @@ fn right_pane(
                     mods,
                     resourcepacks,
                     shaderpacks,
+                    mods_expanded,
                     quick_play,
                     settings,
                     sandbox_status,
@@ -2190,7 +2280,7 @@ fn right_pane(
                     settings_scroll,
                     this.clone(),
                     cx,
-                ))
+                )),
         )
 }
 
@@ -2202,6 +2292,7 @@ fn tab_body(
     mods: &[ContentEntry],
     resourcepacks: &[ContentEntry],
     shaderpacks: &[ContentEntry],
+    mods_expanded: bool,
     quick_play: &QuickPlayLists,
     settings: Option<&instance_settings::SettingsForm>,
     sandbox_status: &SandboxStatus,
@@ -2224,122 +2315,127 @@ fn tab_body(
         .min_h_0()
         .w_full()
         .gap_4()
-                .when(
-                    !status.is_empty() && pane != InstancePane::Settings,
-                    |el| {
-                        el.child(status_alert(
-                            status,
-                            {
-                                let this = this.clone();
-                                move |_, _, cx| {
-                                    this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
-                                }
-                            },
-                            cx,
-                        ))
-                    },
+        .when(!status.is_empty() && pane != InstancePane::Settings, |el| {
+            el.child(status_alert(
+                status,
+                {
+                    let this = this.clone();
+                    move |_, _, cx| {
+                        this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
+                    }
+                },
+                cx,
+            ))
+        })
+        .child(match pane {
+            InstancePane::Play => instance_play::play_tab(
+                instance,
+                quick_play,
+                preparing,
+                {
+                    let this = this.clone();
+                    move |target, _, _, cx| {
+                        this.update(cx, |this, cx| {
+                            this.play_or_stop(id, Some(target), cx);
+                        })
+                        .ok();
+                    }
+                },
+                play_scroll,
+                cx,
+            )
+            .into_any_element(),
+            InstancePane::Content => content_scroll
+                .vertical(
+                    v_flex()
+                        .id("instance-content-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full(),
                 )
-                .child(match pane {
-                    InstancePane::Play => instance_play::play_tab(
-                        instance,
-                        quick_play,
-                        preparing,
+                .child(instance_content::content_tab(
+                    mods,
+                    resourcepacks,
+                    shaderpacks,
+                    instance.loader,
+                    add_enabled,
+                    mods_expanded,
+                    {
+                        let this = this.clone();
+                        move |path, enabled, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.toggle_content(path, enabled, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |path, _, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.confirm_delete_content(path, window, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |class, _, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.open_content_catalog(class, window, cx);
+                            })
+                            .ok();
+                        }
+                    },
+                    {
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| this.toggle_mods_expanded(cx))
+                                .ok();
+                        }
+                    },
+                    cx,
+                ))
+                .into_any_element(),
+            InstancePane::Settings => settings_scroll
+                .vertical(
+                    v_flex()
+                        .id("instance-settings-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .w_full(),
+                )
+                .child(match settings {
+                    Some(form) => instance_settings::settings_tab(
+                        form,
+                        sandbox_status,
+                        status,
                         {
                             let this = this.clone();
-                            move |target, _, _, cx| {
+                            move |enabled, _, cx| {
                                 this.update(cx, |this, cx| {
-                                    this.play_or_stop(id, Some(target), cx);
+                                    this.set_sandbox(enabled, cx);
                                 })
                                 .ok();
                             }
                         },
-                        play_scroll,
+                        {
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
+                            }
+                        },
                         cx,
                     )
                     .into_any_element(),
-                    InstancePane::Content => content_scroll
-                        .vertical(
-                            v_flex()
-                                .id("instance-content-scroll")
-                                .flex_1()
-                                .min_h_0()
-                                .w_full(),
-                        )
-                        .child(instance_content::content_tab(
-                            mods,
-                            resourcepacks,
-                            shaderpacks,
-                            instance.loader,
-                            add_enabled,
-                            {
-                                let this = this.clone();
-                                move |path, enabled, _, cx| {
-                                    this.update(cx, |this, cx| {
-                                        this.toggle_content(path, enabled, cx);
-                                    })
-                                    .ok();
-                                }
-                            },
-                            {
-                                let this = this.clone();
-                                move |path, _, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        this.confirm_delete_content(path, window, cx);
-                                    })
-                                    .ok();
-                                }
-                            },
-                            {
-                                let this = this.clone();
-                                move |class, _, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        this.open_content_catalog(class, window, cx);
-                                    })
-                                    .ok();
-                                }
-                            },
-                            cx,
-                        ))
+                    None => div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading settings…")
                         .into_any_element(),
-                    InstancePane::Settings => settings_scroll
-                        .vertical(
-                            v_flex()
-                                .id("instance-settings-scroll")
-                                .flex_1()
-                                .min_h_0()
-                                .w_full(),
-                        )
-                        .child(match settings {
-                            Some(form) => instance_settings::settings_tab(
-                                form,
-                                sandbox_status,
-                                status,
-                                {
-                                    let this = this.clone();
-                                    move |enabled, _, cx| {
-                                        this.update(cx, |this, cx| {
-                                            this.set_sandbox(enabled, cx);
-                                        })
-                                        .ok();
-                                    }
-                                },
-                                {
-                                    let this = this.clone();
-                                    move |_, _, cx| {
-                                        this.update(cx, |this, cx| this.dismiss_status(cx)).ok();
-                                    }
-                                },
-                                cx,
-                            )
-                            .into_any_element(),
-                            None => div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Loading settings…")
-                                .into_any_element(),
-                        })
-                        .into_any_element(),
-                });
+                })
+                .into_any_element(),
+        });
     if content_anim == ContentAnim::Tab {
         body.with_animation(
             match pane {
@@ -2347,8 +2443,8 @@ fn tab_body(
                 InstancePane::Content => "tab-in-content",
                 InstancePane::Settings => "tab-in-settings",
             },
-            motion(),
-            |this, delta| this.opacity(delta).mt(px(8. * (1. - delta))),
+            tab_motion(),
+            |this, delta| this.opacity(delta).mt(px(6. * (1. - delta))),
         )
         .into_any_element()
     } else {
@@ -2378,7 +2474,7 @@ fn pane_switcher(
         .w_full()
         .flex_shrink_0()
         .p(px(3.))
-        .rounded(px(10.))
+        .rounded(px(12.))
         .bg(cx.theme().muted)
         .child(
             div()
@@ -2459,7 +2555,7 @@ fn pane_thumb(
         .top_0()
         .bottom_0()
         .w(relative(1.0 / 3.0))
-        .rounded(px(8.))
+        .rounded(px(9.))
         .bg(cx.theme().secondary_hover);
     if from == pane {
         return pill.left(relative(end)).into_any_element();
@@ -2475,7 +2571,7 @@ fn pane_thumb(
                 (InstancePane::Settings, InstancePane::Content) => "thumb-settings-content",
                 _ => "thumb-idle",
             },
-            motion(),
+            tab_motion(),
             move |this, delta| this.left(relative(start + (end - start) * delta)),
         )
         .into_any_element()
@@ -2501,15 +2597,37 @@ fn empty_state(
 ) -> impl IntoElement {
     v_flex().size_full().items_center().justify_center().child(
         v_flex()
-            .w(px(320.))
+            .w(px(360.))
             .items_center()
-            .gap_2()
-            .child(empty_panel(
-                IconName::Plus,
-                "Pick an instance",
-                "Or create one to download the game, launch, and keep local mods.",
-                cx,
-            ))
+            .gap_4()
+            .child(
+                div()
+                    .size(px(56.))
+                    .rounded(px(16.))
+                    .bg(cx.theme().muted)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground)),
+            )
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child("Choose an instance"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .text_center()
+                            .child("Create one to download the game, launch, and keep mods local."),
+                    ),
+            )
             .child(
                 crate::chrome::cta("empty-create")
                     .label("New instance")

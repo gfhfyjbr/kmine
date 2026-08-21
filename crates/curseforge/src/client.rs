@@ -198,12 +198,9 @@ impl Client {
     }
 
     pub async fn changelog(&self, mod_id: u32, file_id: u32) -> Result<String, Error> {
-        self.get_data(
-            &format!("/v1/mods/{mod_id}/files/{file_id}/changelog"),
-            &[],
-        )
-        .await
-        .map_err(|e| map_http(e, Some((crate::ResourceKind::File, file_id))))
+        self.get_data(&format!("/v1/mods/{mod_id}/files/{file_id}/changelog"), &[])
+            .await
+            .map_err(|e| map_http(e, Some((crate::ResourceKind::File, file_id))))
     }
 
     pub async fn minecraft_versions(&self) -> Result<Vec<MinecraftVersion>, Error> {
@@ -228,7 +225,10 @@ impl Client {
             .await
     }
 
-    pub async fn resolve_pack(&self, manifest: &crate::Manifest) -> Result<crate::ResolvedPack, Error> {
+    pub async fn resolve_pack(
+        &self,
+        manifest: &crate::Manifest,
+    ) -> Result<crate::ResolvedPack, Error> {
         let ids: Vec<u32> = manifest.files.iter().map(|f| f.file_id).collect();
         let fetched = self.get_files(&ids).await?;
         let mut by_id = std::collections::HashMap::new();
@@ -283,12 +283,12 @@ impl Client {
                 });
             }
             let m = self.get_mod(mod_id).await?;
-            let idx = m.file_index_for(game_version, loader).ok_or_else(|| {
-                Error::NoCompatibleFile {
-                    mod_id,
-                    game_version: game_version.to_string(),
-                }
-            })?;
+            let idx =
+                m.file_index_for(game_version, loader)
+                    .ok_or_else(|| Error::NoCompatibleFile {
+                        mod_id,
+                        game_version: game_version.to_string(),
+                    })?;
             let file = self.get_file(mod_id, idx.file_id).await?;
             for dep in file.required_mod_ids() {
                 if !seen.contains(&dep) {
@@ -801,7 +801,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let err = test_client(&server).await.get_mod(238222).await.unwrap_err();
+        let err = test_client(&server)
+            .await
+            .get_mod(238222)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             Error::NotFound {
@@ -844,13 +848,17 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/mods/238222/description"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                br#"{"data":"<p>html</p>"}"#,
-                "application/json",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(br#"{"data":"<p>html</p>"}"#, "application/json"),
+            )
             .mount(&server)
             .await;
-        let html = test_client(&server).await.description(238222).await.unwrap();
+        let html = test_client(&server)
+            .await
+            .description(238222)
+            .await
+            .unwrap();
         assert_eq!(html, "<p>html</p>");
     }
 
@@ -945,10 +953,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/mods/1/files/2/changelog"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                br#"{"data":"<p>notes</p>"}"#,
-                "application/json",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(br#"{"data":"<p>notes</p>"}"#, "application/json"),
+            )
             .mount(&server)
             .await;
         let html = test_client(&server).await.changelog(1, 2).await.unwrap();
@@ -998,10 +1006,7 @@ mod tests {
             "1.20.1"
         );
         assert_eq!(
-            c.minecraft_version("1.20.1")
-                .await
-                .unwrap()
-                .version_string,
+            c.minecraft_version("1.20.1").await.unwrap().version_string,
             "1.20.1"
         );
     }
@@ -1205,7 +1210,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/mods/files"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(br#"{"data":[]}"#, "application/json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(br#"{"data":[]}"#, "application/json"),
+            )
             .mount(&server)
             .await;
         let manifest =
@@ -1230,7 +1237,9 @@ mod tests {
         let mod_body = r#"{"data":{"id":2,"gameId":432,"name":"lib","slug":"lib","links":{},"summary":"","status":4,"downloadCount":0,"isFeatured":false,"categories":[],"authors":[],"screenshots":[],"latestFiles":[],"latestFilesIndexes":[{"gameVersion":"1.20.1","fileId":22,"filename":"lib.jar","releaseType":1,"modLoader":1}],"isAvailable":true,"thumbsUpCount":0}}"#;
         Mock::given(method("GET"))
             .and(path("/v2/mods/2"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(mod_body.as_bytes(), "application/json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(mod_body.as_bytes(), "application/json"),
+            )
             .mount(&server)
             .await;
         let file_body = format!(r#"{{"data":{}}}"#, file_json(22, 2, None));

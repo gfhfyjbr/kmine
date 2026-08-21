@@ -76,7 +76,7 @@ fn main() {
             cx.activate(true);
             let engine = engine.clone();
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1080.), px(700.)), cx)),
+                window_bounds: Some(WindowBounds::centered(size(px(1120.), px(720.)), cx)),
                 window_background: window_background(),
                 app_id: Some("dev.kmine.launcher".into()),
                 titlebar: Some(TitlebarOptions {

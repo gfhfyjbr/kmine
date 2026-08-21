@@ -155,13 +155,13 @@ pub(super) fn pack(files: &[(&str, &[u8])]) -> Vec<u8> {
                 cur.insert(part.to_string(), Value::Object(meta));
                 return;
             }
-            let entry = cur
-                .entry(part.to_string())
-                .or_insert_with(|| Value::Object({
+            let entry = cur.entry(part.to_string()).or_insert_with(|| {
+                Value::Object({
                     let mut m = Map::new();
                     m.insert("files".into(), Value::Object(Map::new()));
                     m
-                }));
+                })
+            });
             let obj = entry.as_object_mut().expect("dir");
             let files = obj
                 .entry("files")
@@ -204,7 +204,10 @@ mod tests {
         let bytes = pack(&[("dist/background/background.js", b"hello")]);
         let asar = Asar::parse(&bytes).expect("parse");
         let files: Vec<_> = asar.files().collect();
-        assert_eq!(files, vec![("dist/background/background.js", b"hello".as_slice())]);
+        assert_eq!(
+            files,
+            vec![("dist/background/background.js", b"hello".as_slice())]
+        );
     }
 
     #[test]

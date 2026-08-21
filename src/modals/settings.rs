@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use gpui::{div, App, ClickEvent, IntoElement, ParentElement, Styled, Window};
-use gpui_component::{button::Button, h_flex, v_flex, ActiveTheme, IconName};
+use gpui::{App, ClickEvent, IntoElement, ParentElement, Styled, Window, div};
+use gpui_component::{ActiveTheme, IconName, button::Button, h_flex, v_flex};
 
 use crate::chrome::{
     card, modal, modal_body, modal_close, modal_footer, modal_header, section_label, sheet,

@@ -162,7 +162,11 @@ impl PackZip {
             self.next_index += 1;
             let mut file = match self.archive.by_index(i) {
                 Ok(f) => f,
-                Err(err) => return Some(Err(Error::Zip { message: err.to_string() })),
+                Err(err) => {
+                    return Some(Err(Error::Zip {
+                        message: err.to_string(),
+                    }));
+                }
             };
             if file.is_dir() {
                 continue;
@@ -297,6 +301,9 @@ mod tests {
     fn pack_zip_two_roots_without_manifest_errors() {
         let bytes = zip_with(&[("a/foo.txt", b"1"), ("b/bar.txt", b"2")]);
         let mut pack = PackZip::parse(bytes).unwrap();
-        assert!(matches!(pack.manifest().unwrap_err(), crate::Error::Manifest { .. }));
+        assert!(matches!(
+            pack.manifest().unwrap_err(),
+            crate::Error::Manifest { .. }
+        ));
     }
 }

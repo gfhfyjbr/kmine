@@ -9,9 +9,9 @@ pub fn apply_launcher_colors(cx: &mut App) {
     let bg = rgb(0x121110).into();
     let raised = rgb(0x1b1a18).into();
     let surface = rgb(0x252421).into();
-    let surface_hover = rgb(0x2e2c28).into();
+    let surface_hover = rgb(0x332f2a).into();
     let surface_active = rgb(0x211f1c).into();
-    let border = rgb(0x33312c).into();
+    let border = rgb(0x3a3731).into();
     let fg = rgb(0xeceae4).into();
     let muted_fg = rgb(0x9a968c).into();
     let white = rgb(0xf4f3ef).into();
@@ -129,7 +129,7 @@ pub fn apply_launcher_colors(cx: &mut App) {
     theme.overlay = rgb(0x0a0908).into();
     theme.drag_border = rgb(0x4a4740).into();
     theme.font_family = ".SystemUIFont".into();
-    theme.radius = px(8.);
-    theme.radius_lg = px(12.);
+    theme.radius = px(9.);
+    theme.radius_lg = px(16.);
     theme.tokens = ThemeTokens::from(&theme.colors);
 }

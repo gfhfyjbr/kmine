@@ -7,8 +7,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName,
     alert::Alert,
-    button::{Button, ButtonVariants},
-    h_flex,
+    button::Button,
     input::{Input, InputState},
     v_flex,
 };
@@ -107,10 +106,11 @@ fn render_kind(
             ))
             .child(
                 modal_body().child(
-                    h_flex()
+                    div()
                         .id("create-kind-grid")
                         .w_full()
-                        .flex_wrap()
+                        .grid()
+                        .grid_cols(3)
                         .gap_2()
                         .children(LOADERS.iter().copied().map(|loader| {
                             let on_kind = on_kind.clone();
@@ -199,30 +199,25 @@ fn kind_cell(
     let radius = px(10.);
     v_flex()
         .id(id)
-        .w(px(124.))
+        .w_full()
         .gap_2()
         .p_2()
         .items_center()
         .rounded(radius)
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted.opacity(0.35))
+        .bg(cx.theme().muted)
         .cursor_pointer()
-        .hover(|this| this.bg(cx.theme().muted))
+        .hover(|this| this.bg(cx.theme().secondary_hover))
         .on_click(on_click)
         .child(
             div()
-                .size(px(72.))
-                .rounded(px(8.))
+                .size(px(80.))
+                .rounded(px(10.))
                 .overflow_hidden()
-                .border_1()
-                .border_color(cx.theme().border.opacity(0.55))
                 .bg(cx.theme().secondary_active)
                 .child(
                     img(default_cover(loader))
                         .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .rounded(px(8.)),
+                        .object_fit(ObjectFit::Cover),
                 ),
         )
         .child(
@@ -241,24 +236,20 @@ fn modpack_cell(
     let radius = px(10.);
     v_flex()
         .id("kind-Modpack")
-        .w(px(124.))
+        .w_full()
         .gap_2()
         .p_2()
         .items_center()
         .rounded(radius)
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted.opacity(0.35))
+        .bg(cx.theme().muted)
         .cursor_pointer()
-        .hover(|this| this.bg(cx.theme().muted))
+        .hover(|this| this.bg(cx.theme().secondary_hover))
         .on_click(on_click)
         .child(
             div()
-                .size(px(72.))
-                .rounded(px(8.))
+                .size(px(80.))
+                .rounded(px(10.))
                 .overflow_hidden()
-                .border_1()
-                .border_color(cx.theme().border.opacity(0.55))
                 .bg(cx.theme().secondary_active)
                 .flex()
                 .items_center()

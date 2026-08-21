@@ -514,10 +514,7 @@ mod tests {
         let f = load_file();
         assert_eq!(f.file_name, "oreexcavation-1.13.174.jar");
         assert_eq!(f.file_fingerprint, 3871571640);
-        assert_eq!(
-            f.sha1(),
-            Some("19b1540f5e69fe6d04d174915e834bb614bf51ce")
-        );
+        assert_eq!(f.sha1(), Some("19b1540f5e69fe6d04d174915e834bb614bf51ce"));
         assert_eq!(f.md5(), Some("1e87b83ed930e864de2a3150255f30bf"));
         assert_eq!(f.required_mod_ids().collect::<Vec<_>>(), vec![123456]);
         assert!(f.is_approved());
@@ -589,9 +586,10 @@ mod tests {
             .file_index_for("1.20.1", Some(ModLoaderType::Forge))
             .unwrap();
         assert_eq!(idx.file_id, 5700000);
-        assert!(m
-            .file_index_for("1.20.1", Some(ModLoaderType::Fabric))
-            .is_none());
+        assert!(
+            m.file_index_for("1.20.1", Some(ModLoaderType::Fabric))
+                .is_none()
+        );
     }
 
     #[test]

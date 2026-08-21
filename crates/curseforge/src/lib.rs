@@ -20,10 +20,10 @@ pub use download::{Downloaded, cdn_file_url, resolve_download_url};
 pub use error::{Error, ResourceKind};
 pub use extract::{CfCoreKey, CfKeyError, extract_from_bytes, extract_from_path};
 pub use fetch::{LATEST_MAC_DMG, extract_from_source, extract_from_url};
-pub use fingerprint::{fingerprint, FingerprintMatch, FingerprintMatches};
+pub use fingerprint::{FingerprintMatch, FingerprintMatches, fingerprint};
 pub use manifest::{
-    Manifest, ManifestFile, ManifestLoader, ManifestMinecraft, PackOverride, PackZip,
-    ResolvedPack, ResolvedPackFile,
+    Manifest, ManifestFile, ManifestLoader, ManifestMinecraft, PackOverride, PackZip, ResolvedPack,
+    ResolvedPackFile,
 };
 pub use search::{CategoryFilter, FileFilter, SearchQuery};
 pub use types::*;

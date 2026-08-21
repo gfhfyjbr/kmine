@@ -2,17 +2,18 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    App, ClickEvent, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, img, px,
 };
 use gpui_component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     alert::Alert,
     avatar::Avatar,
     button::{Button, ButtonVariants},
     h_flex,
     spinner::Spinner,
     tag::Tag,
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable,
+    v_flex,
 };
 use kmine_engine::{AccountId, AccountSummary, Engine};
 
@@ -182,15 +183,9 @@ fn account_row(
     div()
         .id(key)
         .w_full()
-        .rounded(px(10.))
+        .rounded(px(12.))
         .px_3()
-        .py_2()
-        .border_1()
-        .border_color(if account.selected {
-            cx.theme().border
-        } else {
-            cx.theme().border.opacity(0.)
-        })
+        .py(px(10.))
         .bg(if account.selected {
             cx.theme().muted
         } else {
@@ -262,19 +257,19 @@ fn account_face(
 ) -> impl IntoElement {
     match skin {
         Some(path) => div()
-            .size(px(32.))
+            .size(px(36.))
             .flex_shrink_0()
-            .rounded(px(8.))
+            .rounded(px(9.))
             .overflow_hidden()
             .bg(cx.theme().muted)
             .border_1()
-            .border_color(cx.theme().border)
-            .child(img(path.to_path_buf()).size_full().rounded(px(8.)))
+            .border_color(cx.theme().foreground.opacity(0.08))
+            .child(img(path.to_path_buf()).size_full().rounded(px(9.)))
             .into_any_element(),
         None => Avatar::new()
             .name(account.username.clone())
             .small()
-            .rounded(px(8.))
+            .rounded(px(9.))
             .into_any_element(),
     }
 }

@@ -1,4 +1,4 @@
-use super::extract::{extract_from_bytes, first_key, CfCoreKey};
+use super::extract::{CfCoreKey, extract_from_bytes, first_key};
 use std::io::{Cursor, Write};
 use udif::reader::{DmgReader, DmgReaderOptions};
 

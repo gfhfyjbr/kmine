@@ -1,4 +1,4 @@
-use super::asar::{find_asars, Asar};
+use super::asar::{Asar, find_asars};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;

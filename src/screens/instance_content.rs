@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnimationExt, App, ClickEvent, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::{
@@ -13,7 +13,9 @@ use gpui_component::{
 };
 use kmine_engine::{ContentClass, ContentEntry, ContentFolder, Loader};
 
-use crate::chrome::{empty_list, list_frame, list_row_corners, row_rule, section_header};
+use crate::chrome::{
+    empty_list, list_frame, list_row_corners, row_rule, section_header, tab_motion,
+};
 
 pub fn content_tab(
     mods: &[ContentEntry],
@@ -21,9 +23,11 @@ pub fn content_tab(
     shaderpacks: &[ContentEntry],
     loader: Loader,
     add_enabled: bool,
+    mods_expanded: bool,
     on_toggle: impl Fn(PathBuf, bool, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(ContentClass, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
+    on_expand_mods: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     v_flex()
@@ -35,6 +39,9 @@ pub fn content_tab(
             mods,
             loader,
             add_enabled,
+            true,
+            mods_expanded,
+            on_expand_mods,
             on_toggle.clone(),
             on_delete.clone(),
             on_add.clone(),
@@ -45,6 +52,9 @@ pub fn content_tab(
             resourcepacks,
             loader,
             add_enabled,
+            false,
+            true,
+            |_, _, _| {},
             on_toggle.clone(),
             on_delete.clone(),
             on_add.clone(),
@@ -55,6 +65,9 @@ pub fn content_tab(
             shaderpacks,
             loader,
             add_enabled,
+            false,
+            true,
+            |_, _, _| {},
             on_toggle,
             on_delete,
             on_add,
@@ -67,6 +80,9 @@ fn folder_section(
     entries: &[ContentEntry],
     loader: Loader,
     add_enabled: bool,
+    collapsible: bool,
+    expanded: bool,
+    on_expand: impl Fn(&ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_toggle: impl Fn(PathBuf, bool, &mut Window, &mut App) + Clone + 'static,
     on_delete: impl Fn(PathBuf, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(ContentClass, &ClickEvent, &mut Window, &mut App) + Clone + 'static,
@@ -75,16 +91,48 @@ fn folder_section(
     let show_add = !(loader == Loader::Vanilla && folder == ContentFolder::Mods);
     let class = folder_class(folder);
     let add_id = SharedString::from(format!("content-add-{}", folder_label(folder)));
+    let curtain = collapsible && !entries.is_empty();
     v_flex()
         .w_full()
         .gap_2()
         .child(
             h_flex()
+                .id(SharedString::from(format!(
+                    "content-header-{}",
+                    folder_label(folder)
+                )))
                 .w_full()
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(section_header(folder_label(folder), Some(entries.len()), cx))
+                .when(curtain, |this| {
+                    let on_expand = on_expand.clone();
+                    this.cursor_pointer()
+                        .on_click(move |event, window, cx| on_expand(event, window, cx))
+                })
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .items_center()
+                        .gap_2()
+                        .when(curtain, |this| {
+                            this.child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
+                            )
+                        })
+                        .child(section_header(
+                            folder_label(folder),
+                            Some(entries.len()),
+                            cx,
+                        )),
+                )
                 .when(show_add, |this| {
                     this.child(
                         Button::new(add_id)
@@ -93,24 +141,25 @@ fn folder_section(
                             .label("Add")
                             .disabled(!add_enabled)
                             .on_click(move |event, window, cx| {
+                                cx.stop_propagation();
                                 on_add(class, event, window, cx);
                             }),
                     )
                 }),
         )
-        .child(if entries.is_empty() {
-            list_frame(cx)
-                .child(empty_list(
-                    folder_icon(folder),
-                    folder_empty_title(folder),
-                    folder_empty(folder),
-                    cx,
-                ))
-                .into_any_element()
-        } else {
+        .when(entries.is_empty(), |this| {
+            this.child(list_frame(cx).child(empty_list(
+                folder_icon(folder),
+                folder_empty_title(folder),
+                folder_empty(folder),
+                cx,
+            )))
+        })
+        .when(!entries.is_empty() && expanded, |this| {
             let last = entries.len().saturating_sub(1);
-            list_frame(cx)
-                .children(entries.iter().enumerate().flat_map(|(index, entry)| {
+            let list_h = (last as f32 + 1.0) * 44.0;
+            let list =
+                list_frame(cx).children(entries.iter().enumerate().flat_map(|(index, entry)| {
                     let mut rows = Vec::new();
                     if index > 0 {
                         rows.push(row_rule(cx).into_any_element());
@@ -127,8 +176,20 @@ fn folder_section(
                         .into_any_element(),
                     );
                     rows
-                }))
+                }));
+            this.child(if collapsible {
+                list.with_animation("mods-expand", tab_motion(), move |this, delta| {
+                    if delta >= 1.0 {
+                        this
+                    } else {
+                        this.max_h(px((list_h * delta).max(1.0)))
+                            .opacity((0.35 + 0.65 * delta).min(1.0))
+                    }
+                })
                 .into_any_element()
+            } else {
+                list.into_any_element()
+            })
         })
 }
 
@@ -154,7 +215,7 @@ fn content_row(
             .justify_between()
             .gap_2()
             .px_3()
-            .py_2(),
+            .py(px(9.)),
         first,
         last,
     )
@@ -226,8 +287,8 @@ fn folder_empty_title(folder: ContentFolder) -> &'static str {
 
 fn folder_empty(folder: ContentFolder) -> &'static str {
     match folder {
-        ContentFolder::Mods => "Drop jars into this instance’s mods folder.",
-        ContentFolder::Resourcepacks => "Add packs to the resourcepacks folder.",
-        ContentFolder::Shaderpacks => "Add shaders to the shaderpacks folder.",
+        ContentFolder::Mods => "Use Add, or drop jars into the mods folder.",
+        ContentFolder::Resourcepacks => "Use Add, or drop packs into resourcepacks.",
+        ContentFolder::Shaderpacks => "Use Add, or drop shaders into shaderpacks.",
     }
 }

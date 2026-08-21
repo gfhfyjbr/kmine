@@ -1,7 +1,11 @@
 use gpui::prelude::*;
-use gpui::{div, px, App, ClickEvent, FontWeight, IntoElement, ParentElement, Styled, Window};
-use gpui_component::{button::Button, h_flex, progress::Progress, v_flex, ActiveTheme, Sizable};
+use gpui::{
+    AnimationExt, App, ClickEvent, FontWeight, IntoElement, ParentElement, Styled, Window, div, px,
+};
+use gpui_component::{ActiveTheme, Sizable, button::Button, h_flex, progress::Progress, v_flex};
 use kmine_engine::{Event, InstanceId, ProgressSink};
+
+use crate::chrome::motion;
 
 pub const VERIFY_HEADING: &str = "Verifying files";
 
@@ -61,10 +65,14 @@ pub fn render(
         .flex()
         .justify_center()
         .px_6()
+        .with_animation("progress-in", motion(), |this, delta| {
+            this.opacity(delta).bottom(px(24. + 12. * (1. - delta)))
+        })
         .child(
             h_flex()
                 .id("progress-status")
-                .w(px(440.))
+                .relative()
+                .w(px(460.))
                 .px_4()
                 .py_3()
                 .gap_4()

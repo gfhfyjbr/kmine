@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    App, Pixels, Point, ScrollHandle, StatefulInteractiveElement, Window, point, px,
-};
+use gpui::{App, Pixels, Point, ScrollHandle, StatefulInteractiveElement, Window, point, px};
 
 /// Zed's editor default from the feat/smooth-scrolling branch
 /// (https://github.com/marcocondrache/zed/tree/feat/smooth-scrolling).

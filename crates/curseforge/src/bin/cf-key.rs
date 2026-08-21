@@ -1,4 +1,4 @@
-use kmine_curseforge::{extract_from_source, extract_from_bytes, CfKeyError, LATEST_MAC_DMG};
+use kmine_curseforge::{CfKeyError, LATEST_MAC_DMG, extract_from_bytes, extract_from_source};
 use std::env;
 use std::io::{self, Read};
 use std::process::ExitCode;
