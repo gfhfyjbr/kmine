@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <g transform="translate(512,512)" fill="#F4F3EF">
+    <path fill-rule="evenodd" d="
+      M 0 -400
+      A 400 400 0 1 1 0 400
+      A 400 400 0 1 1 0 -400
+      Z
+      M 0 -328
+      A 328 328 0 1 0 0 328
+      A 328 328 0 1 0 0 -328
+      Z"/>
+    <g>
+      <path d="
+        M 0 -28
+        A 132 132 0 1 1 -114.3 66
+        A 66 66 0 0 0 0 -28
+        Z"/>
+      <path d="
+        M 0 -28
+        A 132 132 0 1 1 -114.3 66
+        A 66 66 0 0 0 0 -28
+        Z" transform="rotate(120)"/>
+      <path d="
+        M 0 -28
+        A 132 132 0 1 1 -114.3 66
+        A 66 66 0 0 0 0 -28
+        Z" transform="rotate(240)"/>
+    </g>
+  </g>
+</svg>

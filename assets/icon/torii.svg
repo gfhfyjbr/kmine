@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <g fill="#F4F3EF">
+    <!-- kasagi: top lintel, lifted ends, slight belly -->
+    <path d="
+      M 148 372
+      C 148 318 188 262 262 256
+      L 762 256
+      C 836 262 876 318 876 372
+      L 834 396
+      C 800 352 748 340 700 340
+      L 324 340
+      C 276 340 224 352 190 396
+      Z"/>
+
+    <!-- shimaki -->
+    <rect x="236" y="392" width="552" height="52" rx="4"/>
+
+    <!-- gakuzuka -->
+    <rect x="486" y="340" width="52" height="104"/>
+
+    <!-- pillars -->
+    <rect x="312" y="340" width="76" height="508" rx="14"/>
+    <rect x="636" y="340" width="76" height="508" rx="14"/>
+
+    <!-- nuki with small end flares -->
+    <path d="
+      M 268 598
+      L 248 588
+      L 248 668
+      L 268 658
+      L 756 658
+      L 776 668
+      L 776 588
+      L 756 598
+      Z"/>
+  </g>
+</svg>

@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod chrome;
+mod dock_icon;
 mod game_output;
 mod modals;
 mod providers;
@@ -48,6 +49,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
+            crate::dock_icon::apply();
             gpui_component::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
             crate::theme::apply_launcher_colors(cx);
@@ -76,6 +78,7 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1080.), px(700.)), cx)),
                 window_background: window_background(),
+                app_id: Some("dev.kmine.launcher".into()),
                 titlebar: Some(TitlebarOptions {
                     title: Some("kmine".into()),
                     appears_transparent: cfg!(target_os = "macos"),

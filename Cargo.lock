@@ -3454,12 +3454,14 @@ name = "kmine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cocoa 0.26.0",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
  "kmine-curseforge",
  "kmine-engine",
+ "objc",
  "open",
  "serde_json",
  "tokio",
